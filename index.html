@@ -3,58 +3,65 @@
   =========================================================================
   DYNAMIC REDIRECT & REVIEW FILTER — untuk usaha akrilik / kartu Google Review
   =========================================================================
-  CARA PAKAI
-  1. Isi `firebaseConfig` di bagian <script type="module"> di bawah dengan
-     kredensial project Firebase Anda (Firestore + Storage harus aktif).
-  2. Deploy file ini apa adanya ke Vercel (static file, tanpa build step).
-  3. Akses via  https://domain-anda.vercel.app/?id=kartu001
-     ID pada parameter `id` = ID dokumen di koleksi Firestore `cards`.
+  ARSITEKTUR (v2 — production-ready)
+  -------------------------------------------------------------------------
+  index.html (frontend) TIDAK LAGI bicara langsung ke Firestore. Semua
+  baca/tulis data lewat folder /api (serverless function di Vercel) yang
+  memakai Firebase Admin SDK. PIN tidak pernah dikirim ke browser dalam
+  bentuk apa pun — verifikasinya terjadi 100% di server.
 
-  SARAN FIRESTORE SECURITY RULES (Firestore Database > Rules)
+  CARA SETUP
+  1. Di Firebase Console > Project Settings > Service Accounts, klik
+     "Generate new private key" — akan terunduh file JSON berisi
+     project_id, client_email, private_key.
+  2. Di Vercel > Project Settings > Environment Variables, tambahkan:
+       FIREBASE_PROJECT_ID   = (isi project_id dari file JSON)
+       FIREBASE_CLIENT_EMAIL = (isi client_email dari file JSON)
+       FIREBASE_PRIVATE_KEY  = (isi private_key dari file JSON, apa adanya
+                                termasuk baris -----BEGIN PRIVATE KEY-----)
+       PIN_PEPPER            = (bebas, string acak rahasia milik Anda sendiri,
+                                mis. hasil generate dari passwordsgenerator.net)
+  3. Isi `CLOUDINARY_CLOUD_NAME` dan `CLOUDINARY_UPLOAD_PRESET` di bagian
+     <script> di bawah — dipakai untuk menyimpan foto bukti komplain
+     (gratis, tanpa kartu kredit). Cara membuatnya:
+       a. Daftar gratis di https://cloudinary.com
+       b. Di Dashboard, salin nilai "Cloud name"
+       c. Settings > Upload > Upload presets > Add upload preset
+          - Signing Mode: "Unsigned" (wajib)
+          - Folder: isi "complaints"
+  4. Deploy folder project ini (index.html + package.json + /api) ke Vercel
+     lewat GitHub. Vercel otomatis mendeteksi folder /api sebagai
+     serverless functions dan menjalankan `npm install` untuk
+     firebase-admin.
+  5. Akses via  https://domain-anda.vercel.app/?id=kartu001
+     PENTING: karena sekarang butuh /api berjalan di server, testing lewat
+     file:///... di komputer TIDAK BISA LAGI — selalu test di URL Vercel
+     (atau pakai `vercel dev` di terminal kalau familiar dengan itu).
+
+  FIRESTORE SECURITY RULES (Firestore Database > Rules)
   -------------------------------------------------------------------------
   rules_version = '2';
   service cloud.firestore {
     match /databases/{database}/documents {
       match /cards/{cardId} {
-        // Publik boleh baca (untuk cek status aktif & ambil link review)
-        allow read: if true;
-
-        // Aktivasi kartu baru: hanya boleh jika dokumen belum ada
-        allow create: if !exists(/databases/$(database)/documents/cards/$(cardId))
-                      && request.resource.data.keys().hasAll(
-                           ['storeName','reviewLink','waNumber','pin'])
-                      && request.resource.data.pin is string
-                      && request.resource.data.pin.size() == 4;
-
-        // Edit data: hanya field yang diizinkan yang boleh berubah,
-        // dan PIN yang dikirim harus sama dengan PIN yang tersimpan.
-        allow update: if request.resource.data.pin == resource.data.pin
-                      && request.resource.data.diff(resource.data)
-                           .affectedKeys()
-                           .hasOnly(['storeName','reviewLink','waNumber','pin']);
-
-        allow delete: if false;
+        // Tutup total akses langsung dari browser. Satu-satunya jalan
+        // masuk/keluar data adalah lewat /api (Admin SDK), yang memang
+        // tidak tunduk pada rules ini sama sekali.
+        allow read, write: if false;
       }
     }
   }
-  CATATAN: karena `allow read: if true`, field `pin` ikut terbaca publik
-  lewat request langsung ke dokumen (bukan lewat UI ini). Untuk kebutuhan
-  produksi yang lebih aman, pindahkan verifikasi PIN ke Cloud Function
-  atau simpan PIN dalam bentuk hash. Untuk skala UMKM/kartu akrilik,
-  rules di atas cukup memadai sebagai pengaman dasar.
 
-  SARAN FIREBASE STORAGE RULES (Storage > Rules)
+  CATATAN KEAMANAN CLOUDINARY (Unsigned Upload Preset)
   -------------------------------------------------------------------------
-  rules_version = '2';
-  service firebase.storage {
-    match /b/{bucket}/o {
-      match /complaints/{fileName} {
-        allow read: if true;
-        allow write: if request.resource.size < 5 * 1024 * 1024
-                     && request.resource.contentType.matches('image/.*');
-      }
-    }
-  }
+  Upload preset "Unsigned" boleh dipanggil dari browser siapa saja yang tahu
+  Cloud Name + nama preset-nya (keduanya memang publik di kode ini, wajar
+  untuk client-side upload). Agar tidak disalahgunakan untuk upload
+  sembarangan, batasi di halaman preset (Settings > Upload > Upload presets
+  > edit preset Anda):
+    - Aktifkan "Eager transformations" / batas ukuran file jika tersedia
+    - Set "Allowed formats" ke: jpg, jpeg, png, webp
+    - Set folder tujuan ke "complaints" agar terpisah rapi
   =========================================================================
 -->
 <html lang="id">
@@ -324,31 +331,29 @@
     </div>
   </div>
 
-<script type="module">
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-  import {
-    getFirestore, doc, getDoc, setDoc, updateDoc
-  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-  import {
-    getStorage, ref, uploadBytes, getDownloadURL
-  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
-
+<script>
   // =======================================================================
-  // TODO: GANTI DENGAN KONFIGURASI FIREBASE PROJECT ANDA
+  // TODO: GANTI DENGAN CLOUD NAME & UPLOAD PRESET CLOUDINARY ANDA
+  // (dipakai untuk upload foto bukti komplain — gratis, tanpa kartu kredit)
   // =======================================================================
-  const firebaseConfig = {
-    apiKey: "AIzaSyBi4kdxve7OGQ6md7i4p4XA6MY79YAkwcM",
-    authDomain: "aza--review.firebaseapp.com",
-    projectId: "aza--review",
-    storageBucket: "aza--review.firebasestorage.app",
-    messagingSenderId: "240411718981",
-    appId: "1:240411718981:web:d927861dd9909450df7a2c",
-    measurementId: "G-G9C9C5XER3",
-  };
+  const CLOUDINARY_CLOUD_NAME = "jvoammpd";
+  const CLOUDINARY_UPLOAD_PRESET = "jvoammpd";
 
-  const app = initializeApp(firebaseConfig);
-  const db = getFirestore(app);
-  const storage = getStorage(app);
+  // ---- Helper: upload foto ke Cloudinary, kembalikan URL publiknya ----
+  async function uploadPhotoToCloudinary(file) {
+    const url = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`;
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
+
+    const res = await fetch(url, { method: "POST", body: formData });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => null);
+      throw new Error(errBody?.error?.message || "Upload foto ke Cloudinary gagal.");
+    }
+    const data = await res.json();
+    return data.secure_url;
+  }
 
   // ---- Helper: ambil elemen ----
   const $ = (id) => document.getElementById(id);
@@ -360,25 +365,11 @@
     });
   }
 
-  // =======================================================================
-  // LOGIKA NOMOR HP -> FORMAT INTERNASIONAL '62'
-  // - "0812..."  -> "62812..."
-  // - "+62812..." -> "62812..."
-  // - "62812..."  -> "62812..." (tetap)
-  // - "812..."    -> "62812..." (fallback, tanpa awalan 0/62)
-  // =======================================================================
-  function formatPhoneToIntl(raw) {
-    let v = String(raw || "").trim().replace(/[\s\-().]/g, "");
-    v = v.replace(/^\+/, ""); // buang tanda '+' jika ada
-    if (v.startsWith("0")) {
-      v = "62" + v.slice(1);
-    } else if (v.startsWith("62")) {
-      // sudah format internasional, biarkan
-    } else {
-      // tidak diawali 0 atau 62 (mis. langsung "812...")
-      v = "62" + v;
-    }
-    return v.replace(/\D/g, ""); // pastikan hanya digit
+  // ---- Helper: panggil endpoint /api/... dan urai JSON-nya ----
+  async function callApi(path, options) {
+    const res = await fetch(path, options);
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, data };
   }
 
   // =======================================================================
@@ -396,16 +387,17 @@
     }
 
     try {
-      const cardRef = doc(db, "cards", cardId);
-      const snap = await getDoc(cardRef);
+      const { ok, data } = await callApi(`/api/card?id=${encodeURIComponent(cardId)}`);
 
-      if (!snap.exists()) {
+      if (!ok) throw new Error(data?.error || "Gagal memuat data kartu");
+
+      if (!data.exists) {
         // BELUM AKTIF -> tampilkan form aktivasi
         $("activation-card-id").textContent = cardId;
         showView("activation");
       } else {
         // SUDAH AKTIF -> tampilkan review gate
-        renderGate(snap.data());
+        renderGate(data);
         showView("gate");
       }
     } catch (err) {
@@ -435,22 +427,21 @@
       return;
     }
 
-    const waNumber = formatPhoneToIntl(waNumberRaw);
-
     setLoading("btn-activate", "activate-label", "activate-spinner", true);
     try {
-      await setDoc(doc(db, "cards", cardId), {
-        storeName,
-        reviewLink,
-        waNumber,
-        pin,
-        createdAt: new Date().toISOString(),
+      const { ok, data } = await callApi("/api/activate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: cardId, storeName, reviewLink, waNumber: waNumberRaw, pin }),
       });
-      renderGate({ storeName, reviewLink, waNumber, pin });
+
+      if (!ok) throw new Error(data?.error || "Gagal mengaktifkan kartu");
+
+      renderGate(data);
       showView("gate");
     } catch (err) {
       console.error(err);
-      errorEl.textContent = "Gagal mengaktifkan kartu. Silakan coba lagi.";
+      errorEl.textContent = err.message || "Gagal mengaktifkan kartu. Silakan coba lagi.";
       errorEl.classList.remove("hidden-panel");
     } finally {
       setLoading("btn-activate", "activate-label", "activate-spinner", false, "Aktifkan Kartu");
@@ -486,7 +477,7 @@
   });
 
   // =======================================================================
-  // 4. FORM KOMPLAIN + UPLOAD FOTO KE STORAGE + REDIRECT WHATSAPP
+  // 4. FORM KOMPLAIN + UPLOAD FOTO KE CLOUDINARY + REDIRECT WHATSAPP
   // =======================================================================
   $("form-complaint").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -504,15 +495,29 @@
       return;
     }
 
+    // Validasi foto (format & ukuran) sebelum diupload ke Cloudinary
+    if (file) {
+      const allowedTypes = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
+      const maxSizeBytes = 5 * 1024 * 1024; // 5MB
+
+      if (!allowedTypes.includes(file.type)) {
+        errorEl.textContent = "Format foto tidak didukung. Gunakan JPG, PNG, atau WEBP.";
+        errorEl.classList.remove("hidden-panel");
+        return;
+      }
+      if (file.size > maxSizeBytes) {
+        errorEl.textContent = "Ukuran foto maksimal 5MB. Silakan pilih foto yang lebih kecil.";
+        errorEl.classList.remove("hidden-panel");
+        return;
+      }
+    }
+
     setLoading("btn-send-complaint", "send-complaint-label", "send-complaint-spinner", true);
 
     try {
       let photoUrl = "";
       if (file) {
-        const fileName = `complaints/${Date.now()}_${file.name}`;
-        const fileRef = ref(storage, fileName);
-        await uploadBytes(fileRef, file);
-        photoUrl = await getDownloadURL(fileRef);
+        photoUrl = await uploadPhotoToCloudinary(file);
       }
 
       const waNumber = currentCard?.waNumber || "";
@@ -540,7 +545,11 @@
 
   // =======================================================================
   // 5. MODAL PENGATURAN: VERIFIKASI PIN + EDIT DATA
+  // (PIN diverifikasi di server lewat /api/verify-pin — PIN asli tidak pernah
+  //  tersimpan/terlihat di sisi browser)
   // =======================================================================
+  let verifiedPin = ""; // hanya disimpan sementara di memori tab ini, untuk dikirim ulang saat submit edit
+
   $("btn-open-settings").addEventListener("click", () => openSettingsModal());
   $("btn-close-settings").addEventListener("click", () => closeSettingsModal());
   $("modal-backdrop").addEventListener("click", () => closeSettingsModal());
@@ -550,6 +559,7 @@
     $("settings-edit-step").classList.add("hidden-panel");
     $("settings-pin-input").value = "";
     $("settings-pin-error").classList.add("hidden-panel");
+    verifiedPin = "";
     const modal = $("modal-settings");
     modal.classList.remove("hidden-panel");
     modal.classList.add("flex");
@@ -562,19 +572,42 @@
     modal.classList.remove("flex");
   }
 
-  $("btn-verify-pin").addEventListener("click", () => {
+  $("btn-verify-pin").addEventListener("click", async () => {
     const entered = $("settings-pin-input").value.trim();
     const errorEl = $("settings-pin-error");
+    const btn = $("btn-verify-pin");
 
-    if (entered === (currentCard?.pin || "")) {
-      $("edit-storeName").value = currentCard.storeName || "";
-      $("edit-reviewLink").value = currentCard.reviewLink || "";
-      $("edit-waNumber").value = currentCard.waNumber || "";
-      $("settings-pin-step").classList.add("hidden-panel");
-      $("settings-edit-step").classList.remove("hidden-panel");
-    } else {
-      errorEl.textContent = "PIN salah. Silakan coba lagi.";
+    if (!/^\d{4}$/.test(entered)) {
+      errorEl.textContent = "PIN harus 4 angka.";
       errorEl.classList.remove("hidden-panel");
+      return;
+    }
+
+    btn.disabled = true;
+    try {
+      const { data } = await callApi("/api/verify-pin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: cardId, pin: entered }),
+      });
+
+      if (data?.valid) {
+        verifiedPin = entered;
+        $("edit-storeName").value = currentCard.storeName || "";
+        $("edit-reviewLink").value = currentCard.reviewLink || "";
+        $("edit-waNumber").value = currentCard.waNumber || "";
+        $("settings-pin-step").classList.add("hidden-panel");
+        $("settings-edit-step").classList.remove("hidden-panel");
+      } else {
+        errorEl.textContent = "PIN salah. Silakan coba lagi.";
+        errorEl.classList.remove("hidden-panel");
+      }
+    } catch (err) {
+      console.error(err);
+      errorEl.textContent = "Gagal memeriksa PIN. Coba lagi.";
+      errorEl.classList.remove("hidden-panel");
+    } finally {
+      btn.disabled = false;
     }
   });
 
@@ -585,20 +618,22 @@
 
     const storeName = $("edit-storeName").value.trim();
     const reviewLink = $("edit-reviewLink").value.trim();
-    const waNumber = formatPhoneToIntl($("edit-waNumber").value.trim());
+    const waNumber = $("edit-waNumber").value.trim();
 
     setLoading("btn-save-edit", "save-edit-label", "save-edit-spinner", true);
     try {
-      await updateDoc(doc(db, "cards", cardId), {
-        storeName,
-        reviewLink,
-        waNumber,
-        pin: currentCard.pin,
+      const { ok, data } = await callApi("/api/update-card", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: cardId, pin: verifiedPin, storeName, reviewLink, waNumber }),
       });
+
+      if (!ok) throw new Error(data?.error || "Gagal menyimpan perubahan");
+
       window.location.reload();
     } catch (err) {
       console.error(err);
-      errorEl.textContent = "Gagal menyimpan perubahan. Silakan coba lagi.";
+      errorEl.textContent = err.message || "Gagal menyimpan perubahan. Silakan coba lagi.";
       errorEl.classList.remove("hidden-panel");
       setLoading("btn-save-edit", "save-edit-label", "save-edit-spinner", false, "Simpan Perubahan");
     }
