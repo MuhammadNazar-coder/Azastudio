@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<!--
+  =========================================================================
+  DYNAMIC REDIRECT & REVIEW FILTER — untuk usaha akrilik / kartu Google Review
+  =========================================================================
+  CARA PAKAI
+  1. Isi `firebaseConfig` di bagian <script type="module"> di bawah dengan
+     kredensial project Firebase Anda (Firestore + Storage harus aktif).
+  2. Deploy file ini apa adanya ke Vercel (static file, tanpa build step).
+  3. Akses via  https://domain-anda.vercel.app/?id=kartu001
+     ID pada parameter `id` = ID dokumen di koleksi Firestore `cards`.
+
+  SARAN FIRESTORE SECURITY RULES (Firestore Database > Rules)
+  -------------------------------------------------------------------------
+  rules_version = '2';
+  service cloud.firestore {
+    match /databases/{database}/documents {
+      match /cards/{cardId} {
+        // Publik boleh baca (untuk cek status aktif & ambil link review)
+        allow read: if true;
+
+        // Aktivasi kartu baru: hanya boleh jika dokumen belum ada
+        allow create: if !exists(/databases/$(database)/documents/cards/$(cardId))
+                      && request.resource.data.keys().hasAll(
+                           ['storeName','reviewLink','waNumber','pin'])
+                      && request.resource.data.pin is string
+                      && request.resource.data.pin.size() == 4;
+
+        // Edit data: hanya field yang diizinkan yang boleh berubah,
+        // dan PIN yang dikirim harus sama dengan PIN yang tersimpan.
+        allow update: if request.resource.data.pin == resource.data.pin
+                      && request.resource.data.diff(resource.data)
+                           .affectedKeys()
+                           .hasOnly(['storeName','reviewLink','waNumber','pin']);
+
+        allow delete: if false;
+      }
+    }
+  }
+  CATATAN: karena `allow read: if true`, field `pin` ikut terbaca publik
+  lewat request langsung ke dokumen (bukan lewat UI ini). Untuk kebutuhan
+  produksi yang lebih aman, pindahkan verifikasi PIN ke Cloud Function
+  atau simpan PIN dalam bentuk hash. Untuk skala UMKM/kartu akrilik,
+  rules di atas cukup memadai sebagai pengaman dasar.
+
+  SARAN FIREBASE STORAGE RULES (Storage > Rules)
+  -------------------------------------------------------------------------
+  rules_version = '2';
+  service firebase.storage {
+    match /b/{bucket}/o {
+      match /complaints/{fileName} {
+        allow read: if true;
+        allow write: if request.resource.size < 5 * 1024 * 1024
+                     && request.resource.contentType.matches('image/.*');
+      }
+    }
+  }
+  =========================================================================
+-->
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+<title>Bagaimana Pelayanan Kami?</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          ink: '#132320',
+          bg: '#F6F8F7',
+          primary: { DEFAULT: '#0E7C86', dark: '#0B5F67', light: '#E4F1F1' },
+          warn: { DEFAULT: '#B5585E', light: '#F7EBEC' },
+        },
+        fontFamily: {
+          display: ['Manrope', 'sans-serif'],
+          body: ['Inter', 'sans-serif'],
+        },
+        boxShadow: {
+          acrylic: '0 1px 1px rgba(19,35,32,0.04), 0 8px 24px -8px rgba(19,35,32,0.15)',
+        }
+      }
+    }
+  }
+</script>
+<style>
+  html, body { min-height: 100vh; }
+  body {
+    background:
+      radial-gradient(circle at 15% 10%, rgba(14,124,134,0.10), transparent 45%),
+      radial-gradient(circle at 85% 90%, rgba(14,124,134,0.08), transparent 40%),
+      #F6F8F7;
+  }
+  .glass-panel {
+    background: rgba(255,255,255,0.72);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid rgba(19,35,32,0.06);
+  }
+  .edge-line {
+    background: linear-gradient(90deg, transparent, rgba(14,124,134,0.55), transparent);
+  }
+  .hidden-panel { display: none !important; }
+  [data-fade] { animation: fadeUp .35s ease both; }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .spinner {
+    border: 2.5px solid rgba(19,35,32,0.12);
+    border-top-color: #0E7C86;
+    border-radius: 9999px;
+    width: 22px; height: 22px;
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  input:focus, textarea:focus { outline: none; }
+  ::selection { background: rgba(14,124,134,0.2); }
+</style>
+</head>
+<body class="font-body text-ink antialiased">
+
+  <div class="min-h-screen w-full flex items-center justify-center p-4 sm:p-6">
+    <div class="w-full max-w-md relative">
+
+      <!-- ============ LOADING ============ -->
+      <section id="view-loading" class="glass-panel rounded-3xl shadow-acrylic p-10 flex flex-col items-center gap-4">
+        <div class="spinner"></div>
+        <p class="text-sm text-ink/60">Memuat data kartu…</p>
+      </section>
+
+      <!-- ============ ERROR: ID TIDAK VALID ============ -->
+      <section id="view-error" class="hidden-panel glass-panel rounded-3xl shadow-acrylic p-8 sm:p-10 text-center" data-fade>
+        <div class="mx-auto w-14 h-14 rounded-2xl bg-warn/10 flex items-center justify-center mb-5">
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-7 h-7 text-warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v4m0 4h.01M10.29 3.86l-8.18 14.18A1.5 1.5 0 0 0 3.5 20.5h17a1.5 1.5 0 0 0 1.39-2.46L13.71 3.86a1.5 1.5 0 0 0-2.42 0Z" />
+          </svg>
+        </div>
+        <h1 class="font-display font-extrabold text-xl text-ink mb-2">ID Kartu Tidak Valid atau Tidak Ditemukan</h1>
+        <p class="text-sm text-ink/60 leading-relaxed">
+          Pastikan Anda memindai kartu yang benar. Tautan harus memuat parameter
+          <span class="font-medium text-ink">?id=</span> yang sesuai dengan kartu akrilik Anda.
+        </p>
+      </section>
+
+      <!-- ============ AKTIVASI KARTU BARU ============ -->
+      <section id="view-activation" class="hidden-panel glass-panel rounded-3xl shadow-acrylic p-7 sm:p-9" data-fade>
+        <div class="h-1 w-10 rounded-full edge-line mb-5"></div>
+        <h1 class="font-display font-extrabold text-2xl text-ink mb-1.5">Aktivasi Kartu Baru</h1>
+        <p class="text-sm text-ink/60 mb-6 leading-relaxed">
+          Kartu dengan ID <span id="activation-card-id" class="font-medium text-primary"></span> belum aktif.
+          Lengkapi data toko Anda untuk mulai menerima ulasan.
+        </p>
+
+        <form id="form-activation" class="space-y-4">
+          <div>
+            <label class="block text-xs font-medium text-ink/70 mb-1.5">Nama Toko</label>
+            <input required type="text" id="act-storeName" placeholder="Contoh: Akrilik Jaya Makmur"
+              class="w-full rounded-xl border border-ink/10 bg-white/80 px-4 py-3 text-sm placeholder:text-ink/30 focus:border-primary focus:ring-2 focus:ring-primary/20 transition" />
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-ink/70 mb-1.5">Link Google Review</label>
+            <input required type="url" id="act-reviewLink" placeholder="https://g.page/r/..."
+              class="w-full rounded-xl border border-ink/10 bg-white/80 px-4 py-3 text-sm placeholder:text-ink/30 focus:border-primary focus:ring-2 focus:ring-primary/20 transition" />
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-ink/70 mb-1.5">Nomor WhatsApp Owner</label>
+            <input required type="tel" id="act-waNumber" placeholder="08123456789"
+              class="w-full rounded-xl border border-ink/10 bg-white/80 px-4 py-3 text-sm placeholder:text-ink/30 focus:border-primary focus:ring-2 focus:ring-primary/20 transition" />
+            <p class="text-[11px] text-ink/40 mt-1">Boleh diketik format biasa, sistem akan menyesuaikan otomatis.</p>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-ink/70 mb-1.5">PIN 4-Angka (untuk akses edit nanti)</label>
+            <input required type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" id="act-pin" placeholder="••••"
+              class="w-full rounded-xl border border-ink/10 bg-white/80 px-4 py-3 text-sm tracking-[0.5em] placeholder:tracking-normal placeholder:text-ink/30 focus:border-primary focus:ring-2 focus:ring-primary/20 transition" />
+          </div>
+
+          <p id="activation-error" class="hidden-panel text-xs text-warn"></p>
+
+          <button type="submit" id="btn-activate"
+            class="w-full rounded-xl bg-primary hover:bg-primary-dark text-white font-medium text-sm py-3.5 transition flex items-center justify-center gap-2">
+            <span id="activate-label">Aktifkan Kartu</span>
+            <span id="activate-spinner" class="hidden-panel spinner !w-4 !h-4 !border-white/30 !border-t-white"></span>
+          </button>
+        </form>
+      </section>
+
+      <!-- ============ REVIEW GATE (KARTU AKTIF) ============ -->
+      <section id="view-gate" class="hidden-panel" data-fade>
+        <div class="glass-panel rounded-3xl shadow-acrylic p-7 sm:p-9 relative">
+
+          <button id="btn-open-settings" aria-label="Pengaturan kartu"
+            class="absolute top-5 right-5 w-9 h-9 rounded-full flex items-center justify-center text-ink/35 hover:text-ink/70 hover:bg-ink/5 transition">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 0 0-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 0 0-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 0 0-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 0 0-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 0 0 1.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065Z" />
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+            </svg>
+          </button>
+
+          <div class="h-1 w-10 rounded-full edge-line mb-6"></div>
+
+          <p class="text-xs font-medium text-primary/80 mb-1">Terima kasih sudah berkunjung</p>
+          <h1 id="gate-storeName" class="font-display font-extrabold text-2xl text-ink mb-2 leading-snug">Nama Toko</h1>
+          <p class="text-sm text-ink/60 mb-7">Bagaimana pelayanan kami hari ini?</p>
+
+          <div class="space-y-3">
+            <button id="btn-satisfied"
+              class="w-full rounded-2xl bg-primary hover:bg-primary-dark text-white py-4 px-5 flex items-center gap-3.5 transition group">
+              <span class="w-10 h-10 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01" />
+                  <circle cx="12" cy="12" r="9" stroke-linecap="round" />
+                </svg>
+              </span>
+              <span class="text-left">
+                <span class="block font-medium text-sm">Puas / Bagus</span>
+                <span class="block text-xs text-white/75">Bagikan pengalaman Anda di Google</span>
+              </span>
+            </button>
+
+            <button id="btn-unsatisfied"
+              class="w-full rounded-2xl bg-warn/10 hover:bg-warn/15 text-warn py-4 px-5 flex items-center gap-3.5 transition">
+              <span class="w-10 h-10 rounded-xl bg-warn/10 flex items-center justify-center shrink-0">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5Z" />
+                </svg>
+              </span>
+              <span class="text-left">
+                <span class="block font-medium text-sm">Kurang Puas / Ada Masukan</span>
+                <span class="block text-xs text-warn/70">Sampaikan keluhan langsung ke owner</span>
+              </span>
+            </button>
+          </div>
+
+          <!-- FORM KOMPLAIN -->
+          <div id="complaint-wrap" class="hidden-panel overflow-hidden">
+            <form id="form-complaint" class="mt-5 pt-5 border-t border-ink/10 space-y-4" data-fade>
+              <div>
+                <label class="block text-xs font-medium text-ink/70 mb-1.5">Nama (Opsional)</label>
+                <input type="text" id="cx-name" placeholder="Nama Anda"
+                  class="w-full rounded-xl border border-ink/10 bg-white/80 px-4 py-3 text-sm placeholder:text-ink/30 focus:border-primary focus:ring-2 focus:ring-primary/20 transition" />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-ink/70 mb-1.5">Detail Keluhan</label>
+                <textarea required id="cx-detail" rows="3" placeholder="Ceritakan apa yang kurang berkenan…"
+                  class="w-full rounded-xl border border-ink/10 bg-white/80 px-4 py-3 text-sm placeholder:text-ink/30 focus:border-primary focus:ring-2 focus:ring-primary/20 transition resize-none"></textarea>
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-ink/70 mb-1.5">Foto Bukti (Opsional)</label>
+                <input type="file" id="cx-photo" accept="image/*" capture="environment"
+                  class="w-full text-xs text-ink/60 file:mr-3 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-medium file:bg-primary-light file:text-primary-dark hover:file:bg-primary/20 transition" />
+              </div>
+
+              <p id="complaint-error" class="hidden-panel text-xs text-warn"></p>
+
+              <button type="submit" id="btn-send-complaint"
+                class="w-full rounded-xl bg-ink hover:bg-ink/90 text-white font-medium text-sm py-3.5 transition flex items-center justify-center gap-2">
+                <span id="send-complaint-label">Kirim Masukan</span>
+                <span id="send-complaint-spinner" class="hidden-panel spinner !w-4 !h-4 !border-white/30 !border-t-white"></span>
+              </button>
+            </form>
+          </div>
+
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <!-- ============ MODAL: PENGATURAN (PIN + EDIT) ============ -->
+  <div id="modal-settings" class="hidden-panel fixed inset-0 z-50 items-center justify-center p-4">
+    <div id="modal-backdrop" class="absolute inset-0 bg-ink/40 backdrop-blur-sm"></div>
+
+    <div class="relative w-full max-w-sm glass-panel !bg-white/95 rounded-3xl shadow-acrylic p-7" data-fade>
+      <button id="btn-close-settings" aria-label="Tutup" class="absolute top-4 right-4 w-8 h-8 rounded-full flex items-center justify-center text-ink/40 hover:text-ink hover:bg-ink/5 transition">
+        <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" d="M6 6l12 12M18 6 6 18" />
+        </svg>
+      </button>
+
+      <!-- STEP 1: PIN -->
+      <div id="settings-pin-step">
+        <h2 class="font-display font-extrabold text-lg text-ink mb-1">Kelola Kartu</h2>
+        <p class="text-sm text-ink/60 mb-5">Masukkan PIN 4-Angka untuk mengedit data kartu ini.</p>
+        <input type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" id="settings-pin-input" placeholder="••••"
+          class="w-full rounded-xl border border-ink/10 bg-white px-4 py-3 text-center text-lg tracking-[0.6em] placeholder:tracking-normal placeholder:text-ink/30 focus:border-primary focus:ring-2 focus:ring-primary/20 transition mb-2" />
+        <p id="settings-pin-error" class="hidden-panel text-xs text-warn mb-2"></p>
+        <button id="btn-verify-pin" class="w-full rounded-xl bg-primary hover:bg-primary-dark text-white font-medium text-sm py-3 transition">Lanjutkan</button>
+      </div>
+
+      <!-- STEP 2: EDIT FORM -->
+      <div id="settings-edit-step" class="hidden-panel">
+        <h2 class="font-display font-extrabold text-lg text-ink mb-4">Edit Data Kartu</h2>
+        <form id="form-edit" class="space-y-3.5">
+          <div>
+            <label class="block text-xs font-medium text-ink/70 mb-1.5">Nama Toko</label>
+            <input required type="text" id="edit-storeName"
+              class="w-full rounded-xl border border-ink/10 bg-white px-4 py-2.5 text-sm focus:border-primary focus:ring-2 focus:ring-primary/20 transition" />
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-ink/70 mb-1.5">Link Google Review</label>
+            <input required type="url" id="edit-reviewLink"
+              class="w-full rounded-xl border border-ink/10 bg-white px-4 py-2.5 text-sm focus:border-primary focus:ring-2 focus:ring-primary/20 transition" />
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-ink/70 mb-1.5">Nomor WhatsApp Owner</label>
+            <input required type="tel" id="edit-waNumber"
+              class="w-full rounded-xl border border-ink/10 bg-white px-4 py-2.5 text-sm focus:border-primary focus:ring-2 focus:ring-primary/20 transition" />
+          </div>
+
+          <p id="edit-error" class="hidden-panel text-xs text-warn"></p>
+
+          <button type="submit" id="btn-save-edit"
+            class="w-full rounded-xl bg-primary hover:bg-primary-dark text-white font-medium text-sm py-3 transition flex items-center justify-center gap-2 mt-1">
+            <span id="save-edit-label">Simpan Perubahan</span>
+            <span id="save-edit-spinner" class="hidden-panel spinner !w-4 !h-4 !border-white/30 !border-t-white"></span>
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import {
+    getFirestore, doc, getDoc, setDoc, updateDoc
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+  import {
+    getStorage, ref, uploadBytes, getDownloadURL
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+
+  // =======================================================================
+  // TODO: GANTI DENGAN KONFIGURASI FIREBASE PROJECT ANDA
+  // =======================================================================
+  const firebaseConfig = {
+    apiKey: "AIzaSyBi4kdxve7OGQ6md7i4p4XA6MY79YAkwcM",
+    authDomain: "aza--review.firebaseapp.com",
+    projectId: "aza--review",
+    storageBucket: "aza--review.firebasestorage.app",
+    messagingSenderId: "240411718981",
+    appId: "1:240411718981:web:d927861dd9909450df7a2c",
+    measurementId: "G-G9C9C5XER3",
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  const storage = getStorage(app);
+
+  // ---- Helper: ambil elemen ----
+  const $ = (id) => document.getElementById(id);
+
+  // ---- Helper: tampilkan hanya satu "view" utama ----
+  function showView(name) {
+    ["loading", "error", "activation", "gate"].forEach((v) => {
+      $(`view-${v}`).classList.toggle("hidden-panel", v !== name);
+    });
+  }
+
+  // =======================================================================
+  // LOGIKA NOMOR HP -> FORMAT INTERNASIONAL '62'
+  // - "0812..."  -> "62812..."
+  // - "+62812..." -> "62812..."
+  // - "62812..."  -> "62812..." (tetap)
+  // - "812..."    -> "62812..." (fallback, tanpa awalan 0/62)
+  // =======================================================================
+  function formatPhoneToIntl(raw) {
+    let v = String(raw || "").trim().replace(/[\s\-().]/g, "");
+    v = v.replace(/^\+/, ""); // buang tanda '+' jika ada
+    if (v.startsWith("0")) {
+      v = "62" + v.slice(1);
+    } else if (v.startsWith("62")) {
+      // sudah format internasional, biarkan
+    } else {
+      // tidak diawali 0 atau 62 (mis. langsung "812...")
+      v = "62" + v;
+    }
+    return v.replace(/\D/g, ""); // pastikan hanya digit
+  }
+
+  // =======================================================================
+  // 1. DETEKSI PARAMETER URL
+  // =======================================================================
+  const params = new URLSearchParams(window.location.search);
+  const cardId = (params.get("id") || "").trim();
+
+  init();
+
+  async function init() {
+    if (!cardId) {
+      showView("error");
+      return;
+    }
+
+    try {
+      const cardRef = doc(db, "cards", cardId);
+      const snap = await getDoc(cardRef);
+
+      if (!snap.exists()) {
+        // BELUM AKTIF -> tampilkan form aktivasi
+        $("activation-card-id").textContent = cardId;
+        showView("activation");
+      } else {
+        // SUDAH AKTIF -> tampilkan review gate
+        renderGate(snap.data());
+        showView("gate");
+      }
+    } catch (err) {
+      console.error(err);
+      showView("error");
+      $("view-error").querySelector("p").textContent =
+        "Terjadi kendala saat memuat data kartu. Coba muat ulang halaman.";
+    }
+  }
+
+  // =======================================================================
+  // 2. FORM AKTIVASI KARTU BARU
+  // =======================================================================
+  $("form-activation").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const errorEl = $("activation-error");
+    errorEl.classList.add("hidden-panel");
+
+    const storeName = $("act-storeName").value.trim();
+    const reviewLink = $("act-reviewLink").value.trim();
+    const pin = $("act-pin").value.trim();
+    const waNumberRaw = $("act-waNumber").value.trim();
+
+    if (!/^\d{4}$/.test(pin)) {
+      errorEl.textContent = "PIN harus terdiri dari 4 angka.";
+      errorEl.classList.remove("hidden-panel");
+      return;
+    }
+
+    const waNumber = formatPhoneToIntl(waNumberRaw);
+
+    setLoading("btn-activate", "activate-label", "activate-spinner", true);
+    try {
+      await setDoc(doc(db, "cards", cardId), {
+        storeName,
+        reviewLink,
+        waNumber,
+        pin,
+        createdAt: new Date().toISOString(),
+      });
+      renderGate({ storeName, reviewLink, waNumber, pin });
+      showView("gate");
+    } catch (err) {
+      console.error(err);
+      errorEl.textContent = "Gagal mengaktifkan kartu. Silakan coba lagi.";
+      errorEl.classList.remove("hidden-panel");
+    } finally {
+      setLoading("btn-activate", "activate-label", "activate-spinner", false, "Aktifkan Kartu");
+    }
+  });
+
+  // =======================================================================
+  // 3. RENDER HALAMAN REVIEW GATE
+  // =======================================================================
+  let currentCard = null;
+
+  function renderGate(data) {
+    currentCard = data;
+    $("gate-storeName").textContent = data.storeName || "Toko Kami";
+  }
+
+  $("btn-satisfied").addEventListener("click", () => {
+    if (currentCard?.reviewLink) {
+      window.open(currentCard.reviewLink, "_blank", "noopener");
+    }
+  });
+
+  $("btn-unsatisfied").addEventListener("click", () => {
+    const wrap = $("complaint-wrap");
+    const isHidden = wrap.classList.contains("hidden-panel");
+    if (isHidden) {
+      wrap.classList.remove("hidden-panel");
+      wrap.style.maxHeight = wrap.scrollHeight + "px";
+      setTimeout(() => wrap.scrollIntoView({ behavior: "smooth", block: "end" }), 150);
+    } else {
+      wrap.classList.add("hidden-panel");
+    }
+  });
+
+  // =======================================================================
+  // 4. FORM KOMPLAIN + UPLOAD FOTO KE STORAGE + REDIRECT WHATSAPP
+  // =======================================================================
+  $("form-complaint").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const errorEl = $("complaint-error");
+    errorEl.classList.add("hidden-panel");
+
+    const name = $("cx-name").value.trim() || "Anonim";
+    const detail = $("cx-detail").value.trim();
+    const fileInput = $("cx-photo");
+    const file = fileInput.files?.[0] || null;
+
+    if (!detail) {
+      errorEl.textContent = "Mohon isi detail keluhan terlebih dahulu.";
+      errorEl.classList.remove("hidden-panel");
+      return;
+    }
+
+    setLoading("btn-send-complaint", "send-complaint-label", "send-complaint-spinner", true);
+
+    try {
+      let photoUrl = "";
+      if (file) {
+        const fileName = `complaints/${Date.now()}_${file.name}`;
+        const fileRef = ref(storage, fileName);
+        await uploadBytes(fileRef, file);
+        photoUrl = await getDownloadURL(fileRef);
+      }
+
+      const waNumber = currentCard?.waNumber || "";
+      const lines = [
+        "Halo Owner, ada masukan baru dari pelanggan:",
+        `- Nama: ${name}`,
+        `- Keluhan: ${detail}`,
+      ];
+      if (photoUrl) lines.push(`- Foto Bukti: ${photoUrl}`);
+      const message = lines.join("\n");
+
+      const waUrl = `https://wa.me/${waNumber}?text=${encodeURIComponent(message)}`;
+      window.open(waUrl, "_blank", "noopener");
+
+      $("form-complaint").reset();
+      $("complaint-wrap").classList.add("hidden-panel");
+    } catch (err) {
+      console.error(err);
+      errorEl.textContent = "Gagal mengirim masukan. Periksa koneksi internet Anda.";
+      errorEl.classList.remove("hidden-panel");
+    } finally {
+      setLoading("btn-send-complaint", "send-complaint-label", "send-complaint-spinner", false, "Kirim Masukan");
+    }
+  });
+
+  // =======================================================================
+  // 5. MODAL PENGATURAN: VERIFIKASI PIN + EDIT DATA
+  // =======================================================================
+  $("btn-open-settings").addEventListener("click", () => openSettingsModal());
+  $("btn-close-settings").addEventListener("click", () => closeSettingsModal());
+  $("modal-backdrop").addEventListener("click", () => closeSettingsModal());
+
+  function openSettingsModal() {
+    $("settings-pin-step").classList.remove("hidden-panel");
+    $("settings-edit-step").classList.add("hidden-panel");
+    $("settings-pin-input").value = "";
+    $("settings-pin-error").classList.add("hidden-panel");
+    const modal = $("modal-settings");
+    modal.classList.remove("hidden-panel");
+    modal.classList.add("flex");
+    setTimeout(() => $("settings-pin-input").focus(), 50);
+  }
+
+  function closeSettingsModal() {
+    const modal = $("modal-settings");
+    modal.classList.add("hidden-panel");
+    modal.classList.remove("flex");
+  }
+
+  $("btn-verify-pin").addEventListener("click", () => {
+    const entered = $("settings-pin-input").value.trim();
+    const errorEl = $("settings-pin-error");
+
+    if (entered === (currentCard?.pin || "")) {
+      $("edit-storeName").value = currentCard.storeName || "";
+      $("edit-reviewLink").value = currentCard.reviewLink || "";
+      $("edit-waNumber").value = currentCard.waNumber || "";
+      $("settings-pin-step").classList.add("hidden-panel");
+      $("settings-edit-step").classList.remove("hidden-panel");
+    } else {
+      errorEl.textContent = "PIN salah. Silakan coba lagi.";
+      errorEl.classList.remove("hidden-panel");
+    }
+  });
+
+  $("form-edit").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const errorEl = $("edit-error");
+    errorEl.classList.add("hidden-panel");
+
+    const storeName = $("edit-storeName").value.trim();
+    const reviewLink = $("edit-reviewLink").value.trim();
+    const waNumber = formatPhoneToIntl($("edit-waNumber").value.trim());
+
+    setLoading("btn-save-edit", "save-edit-label", "save-edit-spinner", true);
+    try {
+      await updateDoc(doc(db, "cards", cardId), {
+        storeName,
+        reviewLink,
+        waNumber,
+        pin: currentCard.pin,
+      });
+      window.location.reload();
+    } catch (err) {
+      console.error(err);
+      errorEl.textContent = "Gagal menyimpan perubahan. Silakan coba lagi.";
+      errorEl.classList.remove("hidden-panel");
+      setLoading("btn-save-edit", "save-edit-label", "save-edit-spinner", false, "Simpan Perubahan");
+    }
+  });
+
+  // ---- Helper: state loading tombol ----
+  function setLoading(btnId, labelId, spinnerId, isLoading, restoreLabel) {
+    const btn = $(btnId);
+    const label = $(labelId);
+    const spinner = $(spinnerId);
+    btn.disabled = isLoading;
+    btn.classList.toggle("opacity-70", isLoading);
+    spinner.classList.toggle("hidden-panel", !isLoading);
+    if (!isLoading && restoreLabel) label.textContent = restoreLabel;
+  }
+</script>
+</body>
+</html>
