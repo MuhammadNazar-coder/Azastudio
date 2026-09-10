@@ -422,7 +422,7 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path stroke-linecap="round" d="m20 20-3.5-3.5"/></svg>
               <input type="search" id="search-input" placeholder="Cari ID kartu / nama toko…" />
             </div>
-            <a href="/api/admin-export" class="btn-link">Ekspor CSV</a>
+            <a href="/api/admin?action=export" class="btn-link">Ekspor CSV</a>
           </div>
           <div style="overflow-x: auto;">
             <table>
@@ -548,7 +548,7 @@
     setLoading("btn-login", "login-label", "login-spinner", true);
 
     try {
-      const { ok, data } = await callApi("/api/admin-login", {
+      const { ok, data } = await callApi("/api/admin?action=login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password }),
@@ -565,12 +565,12 @@
   });
 
   $("btn-logout").addEventListener("click", async () => {
-    await callApi("/api/admin-logout", { method: "POST" });
+    await callApi("/api/admin?action=logout", { method: "POST" });
     location.reload();
   });
 
   async function init() {
-    const { ok, data } = await callApi("/api/admin-stats");
+    const { ok, data } = await callApi("/api/admin?action=stats");
     if (ok) {
       showApp();
       renderStats(data);
@@ -581,13 +581,13 @@
   }
 
   async function loadDashboard() {
-    const { data } = await callApi("/api/admin-stats");
+    const { data } = await callApi("/api/admin?action=stats");
     renderStats(data);
     loadList();
   }
 
   async function refreshStats() {
-    const { data } = await callApi("/api/admin-stats");
+    const { data } = await callApi("/api/admin?action=stats");
     renderStats(data);
   }
 
@@ -688,7 +688,7 @@
     if (!append) renderSkeletonRows();
 
     const cursorParam = append && nextCursor ? `&cursor=${encodeURIComponent(nextCursor)}` : "";
-    const { ok, data } = await callApi(`/api/admin-list?q=${encodeURIComponent(q)}${cursorParam}`);
+    const { ok, data } = await callApi(`/api/admin?action=list&q=${encodeURIComponent(q)}${cursorParam}`);
     if (!ok) {
       if (!append) $("table-body").innerHTML = `<tr><td colspan="6" class="empty-state">Gagal memuat data. Coba muat ulang halaman.</td></tr>`;
       return;
@@ -749,7 +749,7 @@
       const confirmed = await askConfirm("Hapus kartu?", `Kartu ${id} akan dihapus permanen dan tidak bisa dikembalikan.`);
       if (!confirmed) return;
 
-      const { ok } = await callApi("/api/admin-delete", {
+      const { ok } = await callApi("/api/admin?action=delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id }),
@@ -917,7 +917,7 @@
     try {
       await ensureQrLibsLoaded();
 
-      const { ok, data } = await callApi("/api/admin-generate", {
+      const { ok, data } = await callApi("/api/admin?action=generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ qty, prefix }),
