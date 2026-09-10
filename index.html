@@ -3,12 +3,19 @@
   =========================================================================
   DYNAMIC REDIRECT & REVIEW FILTER — untuk usaha akrilik / kartu Google Review
   =========================================================================
-  ARSITEKTUR (v2 — production-ready)
+  ARSITEKTUR (v3 — production-ready, performance-optimized)
   -------------------------------------------------------------------------
   index.html (frontend) TIDAK LAGI bicara langsung ke Firestore. Semua
   baca/tulis data lewat folder /api (serverless function di Vercel) yang
   memakai Firebase Admin SDK. PIN tidak pernah dikirim ke browser dalam
-  bentuk apa pun — verifikasinya terjadi 100% di server.
+  bentuk apa pun — verifikasinya terjadi 100% di server, dengan rate limit
+  supaya tidak bisa ditebak berulang-ulang.
+
+  CATATAN PERFORMA (v3): halaman ini TIDAK memakai Tailwind CDN lagi.
+  cdn.tailwindcss.com adalah compiler JavaScript yang menyusun ulang semua
+  style di browser setiap halaman dibuka (berat + delay). CSS di bawah ini
+  ditulis manual, hasilnya identik secara visual, tapi berkali-kali lipat
+  lebih ringan dan tidak ada delay compile sama sekali.
 
   CARA SETUP
   1. Di Firebase Console > Project Settings > Service Accounts, klik
@@ -19,49 +26,26 @@
        FIREBASE_CLIENT_EMAIL = (isi client_email dari file JSON)
        FIREBASE_PRIVATE_KEY  = (isi private_key dari file JSON, apa adanya
                                 termasuk baris -----BEGIN PRIVATE KEY-----)
-       PIN_PEPPER            = (bebas, string acak rahasia milik Anda sendiri,
-                                mis. hasil generate dari passwordsgenerator.net)
+       PIN_PEPPER            = (bebas, string acak rahasia milik Anda sendiri)
+       ADMIN_PASSWORD        = (password untuk masuk /admin.html)
+       ADMIN_SESSION_SECRET  = (string acak rahasia lain, beda dari PIN_PEPPER)
   3. Isi `CLOUDINARY_CLOUD_NAME` dan `CLOUDINARY_UPLOAD_PRESET` di bagian
-     <script> di bawah — dipakai untuk menyimpan foto bukti komplain
-     (gratis, tanpa kartu kredit). Cara membuatnya:
-       a. Daftar gratis di https://cloudinary.com
-       b. Di Dashboard, salin nilai "Cloud name"
-       c. Settings > Upload > Upload presets > Add upload preset
-          - Signing Mode: "Unsigned" (wajib)
-          - Folder: isi "complaints"
-  4. Deploy folder project ini (index.html + package.json + /api) ke Vercel
-     lewat GitHub. Vercel otomatis mendeteksi folder /api sebagai
-     serverless functions dan menjalankan `npm install` untuk
-     firebase-admin.
+     <script> di bawah — dipakai untuk menyimpan foto bukti komplain.
+  4. Deploy folder project ini ke Vercel lewat GitHub.
   5. Akses via  https://domain-anda.vercel.app/?id=kartu001
-     PENTING: karena sekarang butuh /api berjalan di server, testing lewat
-     file:///... di komputer TIDAK BISA LAGI — selalu test di URL Vercel
-     (atau pakai `vercel dev` di terminal kalau familiar dengan itu).
+     Dasbor admin ada di  https://domain-anda.vercel.app/admin.html
 
   FIRESTORE SECURITY RULES (Firestore Database > Rules)
   -------------------------------------------------------------------------
   rules_version = '2';
   service cloud.firestore {
     match /databases/{database}/documents {
-      match /cards/{cardId} {
-        // Tutup total akses langsung dari browser. Satu-satunya jalan
-        // masuk/keluar data adalah lewat /api (Admin SDK), yang memang
-        // tidak tunduk pada rules ini sama sekali.
-        allow read, write: if false;
-      }
+      match /cards/{cardId} { allow read, write: if false; }
+      match /scanLogs/{logId} { allow read, write: if false; }
+      match /meta/{docId} { allow read, write: if false; }
+      match /rateLimits/{docId} { allow read, write: if false; }
     }
   }
-
-  CATATAN KEAMANAN CLOUDINARY (Unsigned Upload Preset)
-  -------------------------------------------------------------------------
-  Upload preset "Unsigned" boleh dipanggil dari browser siapa saja yang tahu
-  Cloud Name + nama preset-nya (keduanya memang publik di kode ini, wajar
-  untuk client-side upload). Agar tidak disalahgunakan untuk upload
-  sembarangan, batasi di halaman preset (Settings > Upload > Upload presets
-  > edit preset Anda):
-    - Aktifkan "Eager transformations" / batas ukuran file jika tersedia
-    - Set "Allowed formats" ke: jpg, jpeg, png, webp
-    - Set folder tujuan ke "complaints" agar terpisah rapi
   =========================================================================
 -->
 <html lang="id">
@@ -71,203 +55,273 @@
 <title>Bagaimana Pelayanan Kami?</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<script src="https://cdn.tailwindcss.com"></script>
-<script>
-  tailwind.config = {
-    theme: {
-      extend: {
-        colors: {
-          ink: '#132320',
-          bg: '#F6F8F7',
-          primary: { DEFAULT: '#0E7C86', dark: '#0B5F67', light: '#E4F1F1' },
-          warn: { DEFAULT: '#B5585E', light: '#F7EBEC' },
-        },
-        fontFamily: {
-          display: ['Manrope', 'sans-serif'],
-          body: ['Inter', 'sans-serif'],
-        },
-        boxShadow: {
-          acrylic: '0 1px 1px rgba(19,35,32,0.04), 0 8px 24px -8px rgba(19,35,32,0.15)',
-        }
-      }
-    }
-  }
-</script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@800&family=Inter:wght@400;500&display=swap" rel="stylesheet">
 <style>
-  html, body { min-height: 100vh; }
+  :root {
+    --ink: #132320;
+    --bg: #F6F8F7;
+    --primary: #0E7C86;
+    --primary-dark: #0B5F67;
+    --primary-light: #E4F1F1;
+    --warn: #B5585E;
+    --warn-light: #F7EBEC;
+  }
+  * { box-sizing: border-box; }
+  html, body { min-height: 100vh; margin: 0; }
   body {
+    font-family: 'Inter', sans-serif;
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
     background:
       radial-gradient(circle at 15% 10%, rgba(14,124,134,0.10), transparent 45%),
       radial-gradient(circle at 85% 90%, rgba(14,124,134,0.08), transparent 40%),
-      #F6F8F7;
+      var(--bg);
   }
-  .glass-panel {
+  h1, h2 { font-family: 'Manrope', sans-serif; margin: 0; }
+
+  .page { min-height: 100vh; width: 100%; display: flex; align-items: center; justify-content: center; padding: 24px 16px; }
+  .card-col { width: 100%; max-width: 440px; position: relative; }
+
+  .panel {
     background: rgba(255,255,255,0.72);
     backdrop-filter: blur(14px);
     -webkit-backdrop-filter: blur(14px);
     border: 1px solid rgba(19,35,32,0.06);
+    border-radius: 24px;
+    box-shadow: 0 1px 1px rgba(19,35,32,0.04), 0 8px 24px -8px rgba(19,35,32,0.15);
   }
-  .edge-line {
-    background: linear-gradient(90deg, transparent, rgba(14,124,134,0.55), transparent);
+  .panel-pad-lg { padding: 36px 28px; }
+  .panel-pad { padding: 28px; }
+  @media (min-width: 480px) {
+    .panel-pad-lg { padding: 40px; }
+    .panel-pad { padding: 36px; }
   }
-  .hidden-panel { display: none !important; }
+
+  .edge-line { height: 4px; width: 40px; border-radius: 999px; margin-bottom: 20px; background: linear-gradient(90deg, transparent, rgba(14,124,134,0.55), transparent); }
+  .hidden { display: none !important; }
   [data-fade] { animation: fadeUp .35s ease both; }
-  @keyframes fadeUp {
-    from { opacity: 0; transform: translateY(6px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-  .spinner {
-    border: 2.5px solid rgba(19,35,32,0.12);
-    border-top-color: #0E7C86;
-    border-radius: 9999px;
-    width: 22px; height: 22px;
-    animation: spin .7s linear infinite;
-  }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+  .spinner { border: 2.5px solid rgba(19,35,32,0.12); border-top-color: var(--primary); border-radius: 999px; width: 22px; height: 22px; animation: spin .7s linear infinite; }
+  .spinner-sm { width: 16px; height: 16px; border-color: rgba(255,255,255,0.3); border-top-color: #fff; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  input:focus, textarea:focus { outline: none; }
+
+  input, textarea { font-family: inherit; outline: none; }
   ::selection { background: rgba(14,124,134,0.2); }
+
+  .text-center { text-align: center; }
+  .muted { color: rgba(19,35,32,0.6); }
+  .muted-2 { color: rgba(19,35,32,0.4); }
+  .fine-print { font-size: 11px; margin-top: 4px; }
+  .text-sm { font-size: 14px; line-height: 1.6; }
+
+  .icon-box { width: 56px; height: 56px; border-radius: 16px; display: flex; align-items: center; justify-content: center; margin: 0 auto 20px; background: rgba(181,88,94,0.1); }
+  .icon-box svg { width: 28px; height: 28px; color: var(--warn); }
+
+  h1.title-lg { font-weight: 800; font-size: 22px; margin-bottom: 8px; }
+  h1.title-md { font-weight: 800; font-size: 24px; margin-bottom: 6px; }
+
+  .field { margin-bottom: 16px; }
+  .field:last-of-type { margin-bottom: 0; }
+  .field label { display: block; font-size: 12px; font-weight: 500; color: rgba(19,35,32,0.7); margin-bottom: 6px; }
+  .field input, .field textarea {
+    width: 100%; border: 1px solid rgba(19,35,32,0.1); background: rgba(255,255,255,0.8);
+    border-radius: 12px; padding: 12px 16px; font-size: 14px; transition: border-color .15s, box-shadow .15s;
+  }
+  .field input::placeholder, .field textarea::placeholder { color: rgba(19,35,32,0.3); }
+  .field input:focus, .field textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(14,124,134,0.15); }
+  .field textarea { resize: none; }
+  .pin-input { letter-spacing: 0.5em; }
+  .pin-input::placeholder { letter-spacing: normal; }
+
+  .file-field input[type="file"] { font-size: 12px; color: rgba(19,35,32,0.6); width: 100%; }
+  .file-field input[type="file"]::file-selector-button {
+    margin-right: 12px; padding: 10px 16px; border-radius: 12px; border: 0; font-size: 12px; font-weight: 500;
+    background: var(--primary-light); color: var(--primary-dark); cursor: pointer; transition: background .15s;
+  }
+  .file-field input[type="file"]::file-selector-button:hover { background: rgba(14,124,134,0.2); }
+
+  .error-text { font-size: 12px; color: var(--warn); margin: 8px 0 0; }
+
+  .btn { border: 0; border-radius: 12px; font-size: 14px; font-weight: 500; padding: 14px 20px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; transition: background-color .15s, opacity .15s; }
+  .btn:disabled { opacity: 0.7; cursor: default; }
+  .btn-primary { background: var(--primary); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: var(--primary-dark); }
+  .btn-dark { background: var(--ink); color: #fff; }
+  .btn-dark:hover:not(:disabled) { background: rgba(19,35,32,0.9); }
+  .btn-ghost-sm { background: transparent; color: var(--primary); border: 1px solid rgba(14,124,134,0.3); padding: 10px 16px; font-size: 13px; }
+
+  .choice-list { display: flex; flex-direction: column; gap: 12px; margin-top: 24px; }
+  .choice-btn { border: 0; border-radius: 18px; padding: 16px 20px; display: flex; align-items: center; gap: 14px;
+    text-align: left; cursor: pointer; width: 100%; transition: background-color .15s; }
+  .choice-icon { width: 40px; height: 40px; border-radius: 12px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .choice-icon svg { width: 20px; height: 20px; }
+  .choice-title { display: block; font-weight: 500; font-size: 14px; }
+  .choice-sub { display: block; font-size: 12px; margin-top: 2px; }
+
+  .choice-good { background: var(--primary); color: #fff; }
+  .choice-good:hover { background: var(--primary-dark); }
+  .choice-good .choice-icon { background: rgba(255,255,255,0.15); color: #fff; }
+  .choice-good .choice-sub { color: rgba(255,255,255,0.75); }
+
+  .choice-bad { background: rgba(181,88,94,0.1); color: var(--warn); }
+  .choice-bad:hover { background: rgba(181,88,94,0.15); }
+  .choice-bad .choice-icon { background: rgba(181,88,94,0.1); color: var(--warn); }
+  .choice-bad .choice-sub { color: rgba(181,88,94,0.7); }
+
+  .settings-btn { position: absolute; top: 20px; right: 20px; width: 36px; height: 36px; border-radius: 999px; border: 0;
+    background: transparent; color: rgba(19,35,32,0.35); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background-color .15s, color .15s; }
+  .settings-btn:hover { color: rgba(19,35,32,0.7); background: rgba(19,35,32,0.05); }
+  .settings-btn svg { width: 18px; height: 18px; }
+
+  .eyebrow { font-size: 12px; font-weight: 500; color: rgba(14,124,134,0.8); margin: 0 0 4px; }
+
+  .complaint-wrap { overflow: hidden; }
+  .complaint-form { margin-top: 20px; padding-top: 20px; border-top: 1px solid rgba(19,35,32,0.1); }
+  .complaint-form .field { margin-bottom: 14px; }
+
+  /* ---- Modal ---- */
+  .modal { display: none; position: fixed; inset: 0; z-index: 50; align-items: center; justify-content: center; padding: 16px; }
+  .modal.open { display: flex; }
+  .modal-backdrop { position: absolute; inset: 0; background: rgba(19,35,32,0.4); backdrop-filter: blur(2px); }
+  .modal-box { position: relative; width: 100%; max-width: 380px; background: rgba(255,255,255,0.97); border-radius: 24px;
+    box-shadow: 0 1px 1px rgba(19,35,32,0.04), 0 8px 24px -8px rgba(19,35,32,0.15); padding: 28px; }
+  .modal-close { position: absolute; top: 16px; right: 16px; width: 32px; height: 32px; border-radius: 999px; border: 0;
+    background: transparent; color: rgba(19,35,32,0.4); display: flex; align-items: center; justify-content: center; cursor: pointer; }
+  .modal-close:hover { color: var(--ink); background: rgba(19,35,32,0.05); }
+  .modal-close svg { width: 16px; height: 16px; }
+  h2.modal-title { font-weight: 800; font-size: 18px; margin-bottom: 4px; }
+  .pin-display-input { text-align: center; font-size: 18px; letter-spacing: 0.6em; margin-bottom: 8px; }
 </style>
 </head>
-<body class="font-body text-ink antialiased">
+<body>
 
-  <div class="min-h-screen w-full flex items-center justify-center p-4 sm:p-6">
-    <div class="w-full max-w-md relative">
+  <div class="page">
+    <div class="card-col">
 
       <!-- ============ LOADING ============ -->
-      <section id="view-loading" class="glass-panel rounded-3xl shadow-acrylic p-10 flex flex-col items-center gap-4">
-        <div class="spinner"></div>
-        <p class="text-sm text-ink/60">Memuat data kartu…</p>
+      <section id="view-loading" class="panel panel-pad-lg text-center">
+        <div class="spinner" style="margin: 0 auto 16px;"></div>
+        <p class="text-sm muted">Memuat data kartu…</p>
       </section>
 
       <!-- ============ ERROR: ID TIDAK VALID ============ -->
-      <section id="view-error" class="hidden-panel glass-panel rounded-3xl shadow-acrylic p-8 sm:p-10 text-center" data-fade>
-        <div class="mx-auto w-14 h-14 rounded-2xl bg-warn/10 flex items-center justify-center mb-5">
-          <svg xmlns="http://www.w3.org/2000/svg" class="w-7 h-7 text-warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+      <section id="view-error" class="hidden panel panel-pad-lg text-center" data-fade>
+        <div class="icon-box">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v4m0 4h.01M10.29 3.86l-8.18 14.18A1.5 1.5 0 0 0 3.5 20.5h17a1.5 1.5 0 0 0 1.39-2.46L13.71 3.86a1.5 1.5 0 0 0-2.42 0Z" />
           </svg>
         </div>
-        <h1 class="font-display font-extrabold text-xl text-ink mb-2">ID Kartu Tidak Valid atau Tidak Ditemukan</h1>
-        <p class="text-sm text-ink/60 leading-relaxed">
+        <h1 class="title-lg">ID Kartu Tidak Valid atau Tidak Ditemukan</h1>
+        <p class="text-sm muted">
           Pastikan Anda memindai kartu yang benar. Tautan harus memuat parameter
-          <span class="font-medium text-ink">?id=</span> yang sesuai dengan kartu akrilik Anda.
+          <strong style="color: var(--ink); font-weight: 500;">?id=</strong> yang sesuai dengan kartu akrilik Anda.
         </p>
       </section>
 
       <!-- ============ AKTIVASI KARTU BARU ============ -->
-      <section id="view-activation" class="hidden-panel glass-panel rounded-3xl shadow-acrylic p-7 sm:p-9" data-fade>
-        <div class="h-1 w-10 rounded-full edge-line mb-5"></div>
-        <h1 class="font-display font-extrabold text-2xl text-ink mb-1.5">Aktivasi Kartu Baru</h1>
-        <p class="text-sm text-ink/60 mb-6 leading-relaxed">
-          Kartu dengan ID <span id="activation-card-id" class="font-medium text-primary"></span> belum aktif.
+      <section id="view-activation" class="hidden panel panel-pad" data-fade>
+        <div class="edge-line"></div>
+        <h1 class="title-md">Aktivasi Kartu Baru</h1>
+        <p class="text-sm muted" style="margin-bottom: 24px;">
+          Kartu dengan ID <span id="activation-card-id" style="font-weight: 500; color: var(--primary);"></span> belum aktif.
           Lengkapi data toko Anda untuk mulai menerima ulasan.
         </p>
 
-        <form id="form-activation" class="space-y-4">
-          <div>
-            <label class="block text-xs font-medium text-ink/70 mb-1.5">Nama Toko</label>
-            <input required type="text" id="act-storeName" placeholder="Contoh: Akrilik Jaya Makmur"
-              class="w-full rounded-xl border border-ink/10 bg-white/80 px-4 py-3 text-sm placeholder:text-ink/30 focus:border-primary focus:ring-2 focus:ring-primary/20 transition" />
+        <form id="form-activation">
+          <div class="field">
+            <label>Nama Toko</label>
+            <input required type="text" id="act-storeName" placeholder="Contoh: Akrilik Jaya Makmur" />
           </div>
-          <div>
-            <label class="block text-xs font-medium text-ink/70 mb-1.5">Link Google Review</label>
-            <input required type="url" id="act-reviewLink" placeholder="https://g.page/r/..."
-              class="w-full rounded-xl border border-ink/10 bg-white/80 px-4 py-3 text-sm placeholder:text-ink/30 focus:border-primary focus:ring-2 focus:ring-primary/20 transition" />
+          <div class="field">
+            <label>Link Google Review</label>
+            <input required type="url" id="act-reviewLink" placeholder="https://g.page/r/..." />
           </div>
-          <div>
-            <label class="block text-xs font-medium text-ink/70 mb-1.5">Nomor WhatsApp Owner</label>
-            <input required type="tel" id="act-waNumber" placeholder="08123456789"
-              class="w-full rounded-xl border border-ink/10 bg-white/80 px-4 py-3 text-sm placeholder:text-ink/30 focus:border-primary focus:ring-2 focus:ring-primary/20 transition" />
-            <p class="text-[11px] text-ink/40 mt-1">Boleh diketik format biasa, sistem akan menyesuaikan otomatis.</p>
+          <div class="field">
+            <label>Nomor WhatsApp Owner</label>
+            <input required type="tel" id="act-waNumber" placeholder="08123456789" />
+            <p class="fine-print muted-2">Boleh diketik format biasa, sistem akan menyesuaikan otomatis.</p>
           </div>
-          <div>
-            <label class="block text-xs font-medium text-ink/70 mb-1.5">PIN 4-Angka (untuk akses edit nanti)</label>
-            <input required type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" id="act-pin" placeholder="••••"
-              class="w-full rounded-xl border border-ink/10 bg-white/80 px-4 py-3 text-sm tracking-[0.5em] placeholder:tracking-normal placeholder:text-ink/30 focus:border-primary focus:ring-2 focus:ring-primary/20 transition" />
+          <div class="field">
+            <label>PIN 4-Angka (untuk akses edit nanti)</label>
+            <input required type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" id="act-pin" placeholder="••••" class="pin-input" />
           </div>
 
-          <p id="activation-error" class="hidden-panel text-xs text-warn"></p>
+          <p id="activation-error" class="hidden error-text"></p>
 
-          <button type="submit" id="btn-activate"
-            class="w-full rounded-xl bg-primary hover:bg-primary-dark text-white font-medium text-sm py-3.5 transition flex items-center justify-center gap-2">
+          <button type="submit" id="btn-activate" class="btn btn-primary" style="margin-top: 20px;">
             <span id="activate-label">Aktifkan Kartu</span>
-            <span id="activate-spinner" class="hidden-panel spinner !w-4 !h-4 !border-white/30 !border-t-white"></span>
+            <span id="activate-spinner" class="hidden spinner spinner-sm"></span>
           </button>
         </form>
       </section>
 
       <!-- ============ REVIEW GATE (KARTU AKTIF) ============ -->
-      <section id="view-gate" class="hidden-panel" data-fade>
-        <div class="glass-panel rounded-3xl shadow-acrylic p-7 sm:p-9 relative">
+      <section id="view-gate" class="hidden" data-fade>
+        <div class="panel panel-pad" style="position: relative;">
 
-          <button id="btn-open-settings" aria-label="Pengaturan kartu"
-            class="absolute top-5 right-5 w-9 h-9 rounded-full flex items-center justify-center text-ink/35 hover:text-ink/70 hover:bg-ink/5 transition">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <button id="btn-open-settings" aria-label="Pengaturan kartu" class="settings-btn">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
               <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 0 0-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 0 0-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 0 0-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 0 0-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 0 0 1.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065Z" />
               <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
             </svg>
           </button>
 
-          <div class="h-1 w-10 rounded-full edge-line mb-6"></div>
+          <div class="edge-line" style="margin-bottom: 24px;"></div>
 
-          <p class="text-xs font-medium text-primary/80 mb-1">Terima kasih sudah berkunjung</p>
-          <h1 id="gate-storeName" class="font-display font-extrabold text-2xl text-ink mb-2 leading-snug">Nama Toko</h1>
-          <p class="text-sm text-ink/60 mb-7">Bagaimana pelayanan kami hari ini?</p>
+          <p class="eyebrow">Terima kasih sudah berkunjung</p>
+          <h1 id="gate-storeName" class="title-md" style="line-height: 1.3;">Nama Toko</h1>
+          <p class="text-sm muted" style="margin-bottom: 28px;">Bagaimana pelayanan kami hari ini?</p>
 
-          <div class="space-y-3">
-            <button id="btn-satisfied"
-              class="w-full rounded-2xl bg-primary hover:bg-primary-dark text-white py-4 px-5 flex items-center gap-3.5 transition group">
-              <span class="w-10 h-10 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
-                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <div class="choice-list">
+            <button id="btn-satisfied" class="choice-btn choice-good">
+              <span class="choice-icon">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01" />
                   <circle cx="12" cy="12" r="9" stroke-linecap="round" />
                 </svg>
               </span>
-              <span class="text-left">
-                <span class="block font-medium text-sm">Puas / Bagus</span>
-                <span class="block text-xs text-white/75">Bagikan pengalaman Anda di Google</span>
+              <span>
+                <span class="choice-title">Puas / Bagus</span>
+                <span class="choice-sub">Bagikan pengalaman Anda di Google</span>
               </span>
             </button>
 
-            <button id="btn-unsatisfied"
-              class="w-full rounded-2xl bg-warn/10 hover:bg-warn/15 text-warn py-4 px-5 flex items-center gap-3.5 transition">
-              <span class="w-10 h-10 rounded-xl bg-warn/10 flex items-center justify-center shrink-0">
-                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <button id="btn-unsatisfied" class="choice-btn choice-bad">
+              <span class="choice-icon">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5Z" />
                 </svg>
               </span>
-              <span class="text-left">
-                <span class="block font-medium text-sm">Kurang Puas / Ada Masukan</span>
-                <span class="block text-xs text-warn/70">Sampaikan keluhan langsung ke owner</span>
+              <span>
+                <span class="choice-title">Kurang Puas / Ada Masukan</span>
+                <span class="choice-sub">Sampaikan keluhan langsung ke owner</span>
               </span>
             </button>
           </div>
 
           <!-- FORM KOMPLAIN -->
-          <div id="complaint-wrap" class="hidden-panel overflow-hidden">
-            <form id="form-complaint" class="mt-5 pt-5 border-t border-ink/10 space-y-4" data-fade>
-              <div>
-                <label class="block text-xs font-medium text-ink/70 mb-1.5">Nama (Opsional)</label>
-                <input type="text" id="cx-name" placeholder="Nama Anda"
-                  class="w-full rounded-xl border border-ink/10 bg-white/80 px-4 py-3 text-sm placeholder:text-ink/30 focus:border-primary focus:ring-2 focus:ring-primary/20 transition" />
+          <div id="complaint-wrap" class="hidden complaint-wrap">
+            <form id="form-complaint" class="complaint-form" data-fade>
+              <div class="field">
+                <label>Nama (Opsional)</label>
+                <input type="text" id="cx-name" placeholder="Nama Anda" />
               </div>
-              <div>
-                <label class="block text-xs font-medium text-ink/70 mb-1.5">Detail Keluhan</label>
-                <textarea required id="cx-detail" rows="3" placeholder="Ceritakan apa yang kurang berkenan…"
-                  class="w-full rounded-xl border border-ink/10 bg-white/80 px-4 py-3 text-sm placeholder:text-ink/30 focus:border-primary focus:ring-2 focus:ring-primary/20 transition resize-none"></textarea>
+              <div class="field">
+                <label>Detail Keluhan</label>
+                <textarea required id="cx-detail" rows="3" placeholder="Ceritakan apa yang kurang berkenan…"></textarea>
               </div>
-              <div>
-                <label class="block text-xs font-medium text-ink/70 mb-1.5">Foto Bukti (Opsional)</label>
-                <input type="file" id="cx-photo" accept="image/*" capture="environment"
-                  class="w-full text-xs text-ink/60 file:mr-3 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-medium file:bg-primary-light file:text-primary-dark hover:file:bg-primary/20 transition" />
+              <div class="field file-field">
+                <label>Foto Bukti (Opsional)</label>
+                <input type="file" id="cx-photo" accept="image/*" capture="environment" />
               </div>
 
-              <p id="complaint-error" class="hidden-panel text-xs text-warn"></p>
+              <p id="complaint-error" class="hidden error-text"></p>
 
-              <button type="submit" id="btn-send-complaint"
-                class="w-full rounded-xl bg-ink hover:bg-ink/90 text-white font-medium text-sm py-3.5 transition flex items-center justify-center gap-2">
+              <button type="submit" id="btn-send-complaint" class="btn btn-dark" style="margin-top: 16px;">
                 <span id="send-complaint-label">Kirim Masukan</span>
-                <span id="send-complaint-spinner" class="hidden-panel spinner !w-4 !h-4 !border-white/30 !border-t-white"></span>
+                <span id="send-complaint-spinner" class="hidden spinner spinner-sm"></span>
               </button>
             </form>
           </div>
@@ -279,52 +333,47 @@
   </div>
 
   <!-- ============ MODAL: PENGATURAN (PIN + EDIT) ============ -->
-  <div id="modal-settings" class="hidden-panel fixed inset-0 z-50 items-center justify-center p-4">
-    <div id="modal-backdrop" class="absolute inset-0 bg-ink/40 backdrop-blur-sm"></div>
+  <div id="modal-settings" class="modal">
+    <div id="modal-backdrop" class="modal-backdrop"></div>
 
-    <div class="relative w-full max-w-sm glass-panel !bg-white/95 rounded-3xl shadow-acrylic p-7" data-fade>
-      <button id="btn-close-settings" aria-label="Tutup" class="absolute top-4 right-4 w-8 h-8 rounded-full flex items-center justify-center text-ink/40 hover:text-ink hover:bg-ink/5 transition">
-        <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <div class="modal-box" data-fade>
+      <button id="btn-close-settings" aria-label="Tutup" class="modal-close">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path stroke-linecap="round" d="M6 6l12 12M18 6 6 18" />
         </svg>
       </button>
 
       <!-- STEP 1: PIN -->
       <div id="settings-pin-step">
-        <h2 class="font-display font-extrabold text-lg text-ink mb-1">Kelola Kartu</h2>
-        <p class="text-sm text-ink/60 mb-5">Masukkan PIN 4-Angka untuk mengedit data kartu ini.</p>
-        <input type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" id="settings-pin-input" placeholder="••••"
-          class="w-full rounded-xl border border-ink/10 bg-white px-4 py-3 text-center text-lg tracking-[0.6em] placeholder:tracking-normal placeholder:text-ink/30 focus:border-primary focus:ring-2 focus:ring-primary/20 transition mb-2" />
-        <p id="settings-pin-error" class="hidden-panel text-xs text-warn mb-2"></p>
-        <button id="btn-verify-pin" class="w-full rounded-xl bg-primary hover:bg-primary-dark text-white font-medium text-sm py-3 transition">Lanjutkan</button>
+        <h2 class="modal-title">Kelola Kartu</h2>
+        <p class="text-sm muted" style="margin-bottom: 20px;">Masukkan PIN 4-Angka untuk mengedit data kartu ini.</p>
+        <input type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" id="settings-pin-input" placeholder="••••" class="pin-display-input" style="width: 100%; border: 1px solid rgba(19,35,32,0.1); background: #fff; border-radius: 12px; padding: 12px 16px;" />
+        <p id="settings-pin-error" class="hidden error-text" style="margin-bottom: 8px;"></p>
+        <button id="btn-verify-pin" class="btn btn-primary">Lanjutkan</button>
       </div>
 
       <!-- STEP 2: EDIT FORM -->
-      <div id="settings-edit-step" class="hidden-panel">
-        <h2 class="font-display font-extrabold text-lg text-ink mb-4">Edit Data Kartu</h2>
-        <form id="form-edit" class="space-y-3.5">
-          <div>
-            <label class="block text-xs font-medium text-ink/70 mb-1.5">Nama Toko</label>
-            <input required type="text" id="edit-storeName"
-              class="w-full rounded-xl border border-ink/10 bg-white px-4 py-2.5 text-sm focus:border-primary focus:ring-2 focus:ring-primary/20 transition" />
+      <div id="settings-edit-step" class="hidden">
+        <h2 class="modal-title" style="margin-bottom: 16px;">Edit Data Kartu</h2>
+        <form id="form-edit">
+          <div class="field">
+            <label>Nama Toko</label>
+            <input required type="text" id="edit-storeName" style="background: #fff;" />
           </div>
-          <div>
-            <label class="block text-xs font-medium text-ink/70 mb-1.5">Link Google Review</label>
-            <input required type="url" id="edit-reviewLink"
-              class="w-full rounded-xl border border-ink/10 bg-white px-4 py-2.5 text-sm focus:border-primary focus:ring-2 focus:ring-primary/20 transition" />
+          <div class="field">
+            <label>Link Google Review</label>
+            <input required type="url" id="edit-reviewLink" style="background: #fff;" />
           </div>
-          <div>
-            <label class="block text-xs font-medium text-ink/70 mb-1.5">Nomor WhatsApp Owner</label>
-            <input required type="tel" id="edit-waNumber"
-              class="w-full rounded-xl border border-ink/10 bg-white px-4 py-2.5 text-sm focus:border-primary focus:ring-2 focus:ring-primary/20 transition" />
+          <div class="field">
+            <label>Nomor WhatsApp Owner</label>
+            <input required type="tel" id="edit-waNumber" style="background: #fff;" />
           </div>
 
-          <p id="edit-error" class="hidden-panel text-xs text-warn"></p>
+          <p id="edit-error" class="hidden error-text"></p>
 
-          <button type="submit" id="btn-save-edit"
-            class="w-full rounded-xl bg-primary hover:bg-primary-dark text-white font-medium text-sm py-3 transition flex items-center justify-center gap-2 mt-1">
+          <button type="submit" id="btn-save-edit" class="btn btn-primary" style="margin-top: 16px;">
             <span id="save-edit-label">Simpan Perubahan</span>
-            <span id="save-edit-spinner" class="hidden-panel spinner !w-4 !h-4 !border-white/30 !border-t-white"></span>
+            <span id="save-edit-spinner" class="hidden spinner spinner-sm"></span>
           </button>
         </form>
       </div>
@@ -334,12 +383,10 @@
 <script>
   // =======================================================================
   // TODO: GANTI DENGAN CLOUD NAME & UPLOAD PRESET CLOUDINARY ANDA
-  // (dipakai untuk upload foto bukti komplain — gratis, tanpa kartu kredit)
   // =======================================================================
   const CLOUDINARY_CLOUD_NAME = "jvoammpd";
   const CLOUDINARY_UPLOAD_PRESET = "jvoammpd";
 
-  // ---- Helper: upload foto ke Cloudinary, kembalikan URL publiknya ----
   async function uploadPhotoToCloudinary(file) {
     const url = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`;
     const formData = new FormData();
@@ -355,26 +402,20 @@
     return data.secure_url;
   }
 
-  // ---- Helper: ambil elemen ----
   const $ = (id) => document.getElementById(id);
 
-  // ---- Helper: tampilkan hanya satu "view" utama ----
   function showView(name) {
     ["loading", "error", "activation", "gate"].forEach((v) => {
-      $(`view-${v}`).classList.toggle("hidden-panel", v !== name);
+      $(`view-${v}`).classList.toggle("hidden", v !== name);
     });
   }
 
-  // ---- Helper: panggil endpoint /api/... dan urai JSON-nya ----
   async function callApi(path, options) {
     const res = await fetch(path, options);
     const data = await res.json().catch(() => ({}));
     return { ok: res.ok, status: res.status, data };
   }
 
-  // =======================================================================
-  // 1. DETEKSI PARAMETER URL
-  // =======================================================================
   const params = new URLSearchParams(window.location.search);
   const cardId = (params.get("id") || "").trim();
 
@@ -388,101 +429,100 @@
 
     try {
       const { ok, data } = await callApi(`/api/card?id=${encodeURIComponent(cardId)}`);
-
       if (!ok) throw new Error(data?.error || "Gagal memuat data kartu");
 
       if (!data.exists) {
-        // BELUM AKTIF -> tampilkan form aktivasi
         $("activation-card-id").textContent = cardId;
         showView("activation");
       } else {
-        // SUDAH AKTIF -> tampilkan review gate
         renderGate(data);
         showView("gate");
+        trackScan(cardId);
       }
     } catch (err) {
       console.error(err);
       showView("error");
-      $("view-error").querySelector("p").textContent =
+      $("view-error").querySelector("p.muted").textContent =
         "Terjadi kendala saat memuat data kartu. Coba muat ulang halaman.";
     }
   }
 
+  function trackScan(id) {
+    fetch("/api/track-scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    }).catch(() => {});
+  }
+
+  let currentCard = null;
+  function renderGate(data) {
+    currentCard = data;
+    $("gate-storeName").textContent = data.storeName || "Toko Anda";
+  }
+
   // =======================================================================
-  // 2. FORM AKTIVASI KARTU BARU
+  // AKTIVASI KARTU BARU
   // =======================================================================
   $("form-activation").addEventListener("submit", async (e) => {
     e.preventDefault();
     const errorEl = $("activation-error");
-    errorEl.classList.add("hidden-panel");
+    errorEl.classList.add("hidden");
 
-    const storeName = $("act-storeName").value.trim();
-    const reviewLink = $("act-reviewLink").value.trim();
-    const pin = $("act-pin").value.trim();
-    const waNumberRaw = $("act-waNumber").value.trim();
-
-    if (!/^\d{4}$/.test(pin)) {
-      errorEl.textContent = "PIN harus terdiri dari 4 angka.";
-      errorEl.classList.remove("hidden-panel");
-      return;
-    }
+    const payload = {
+      id: cardId,
+      storeName: $("act-storeName").value.trim(),
+      reviewLink: $("act-reviewLink").value.trim(),
+      waNumber: $("act-waNumber").value.trim(),
+      pin: $("act-pin").value.trim(),
+    };
 
     setLoading("btn-activate", "activate-label", "activate-spinner", true);
     try {
       const { ok, data } = await callApi("/api/activate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: cardId, storeName, reviewLink, waNumber: waNumberRaw, pin }),
+        body: JSON.stringify(payload),
       });
-
       if (!ok) throw new Error(data?.error || "Gagal mengaktifkan kartu");
 
       renderGate(data);
       showView("gate");
     } catch (err) {
       console.error(err);
-      errorEl.textContent = err.message || "Gagal mengaktifkan kartu. Silakan coba lagi.";
-      errorEl.classList.remove("hidden-panel");
+      errorEl.textContent = err.message || "Terjadi kesalahan. Silakan coba lagi.";
+      errorEl.classList.remove("hidden");
     } finally {
       setLoading("btn-activate", "activate-label", "activate-spinner", false, "Aktifkan Kartu");
     }
   });
 
   // =======================================================================
-  // 3. RENDER HALAMAN REVIEW GATE
+  // PILIHAN PUAS / TIDAK PUAS
   // =======================================================================
-  let currentCard = null;
-
-  function renderGate(data) {
-    currentCard = data;
-    $("gate-storeName").textContent = data.storeName || "Toko Kami";
-  }
-
   $("btn-satisfied").addEventListener("click", () => {
-    if (currentCard?.reviewLink) {
-      window.open(currentCard.reviewLink, "_blank", "noopener");
-    }
+    const url = currentCard?.reviewLink || "#";
+    window.open(url, "_blank", "noopener");
   });
 
   $("btn-unsatisfied").addEventListener("click", () => {
     const wrap = $("complaint-wrap");
-    const isHidden = wrap.classList.contains("hidden-panel");
+    const isHidden = wrap.classList.contains("hidden");
     if (isHidden) {
-      wrap.classList.remove("hidden-panel");
-      wrap.style.maxHeight = wrap.scrollHeight + "px";
+      wrap.classList.remove("hidden");
       setTimeout(() => wrap.scrollIntoView({ behavior: "smooth", block: "end" }), 150);
     } else {
-      wrap.classList.add("hidden-panel");
+      wrap.classList.add("hidden");
     }
   });
 
   // =======================================================================
-  // 4. FORM KOMPLAIN + UPLOAD FOTO KE CLOUDINARY + REDIRECT WHATSAPP
+  // FORM KOMPLAIN + UPLOAD FOTO KE CLOUDINARY + REDIRECT WHATSAPP
   // =======================================================================
   $("form-complaint").addEventListener("submit", async (e) => {
     e.preventDefault();
     const errorEl = $("complaint-error");
-    errorEl.classList.add("hidden-panel");
+    errorEl.classList.add("hidden");
 
     const name = $("cx-name").value.trim() || "Anonim";
     const detail = $("cx-detail").value.trim();
@@ -491,23 +531,22 @@
 
     if (!detail) {
       errorEl.textContent = "Mohon isi detail keluhan terlebih dahulu.";
-      errorEl.classList.remove("hidden-panel");
+      errorEl.classList.remove("hidden");
       return;
     }
 
-    // Validasi foto (format & ukuran) sebelum diupload ke Cloudinary
     if (file) {
       const allowedTypes = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
-      const maxSizeBytes = 5 * 1024 * 1024; // 5MB
+      const maxSizeBytes = 5 * 1024 * 1024;
 
       if (!allowedTypes.includes(file.type)) {
         errorEl.textContent = "Format foto tidak didukung. Gunakan JPG, PNG, atau WEBP.";
-        errorEl.classList.remove("hidden-panel");
+        errorEl.classList.remove("hidden");
         return;
       }
       if (file.size > maxSizeBytes) {
         errorEl.textContent = "Ukuran foto maksimal 5MB. Silakan pilih foto yang lebih kecil.";
-        errorEl.classList.remove("hidden-panel");
+        errorEl.classList.remove("hidden");
         return;
       }
     }
@@ -516,11 +555,15 @@
 
     try {
       let photoUrl = "";
-      if (file) {
-        photoUrl = await uploadPhotoToCloudinary(file);
-      }
+      if (file) photoUrl = await uploadPhotoToCloudinary(file);
 
-      const waNumber = currentCard?.waNumber || "";
+      const { ok: contactOk, data: contactData } = await callApi("/api/card-contact", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: cardId }),
+      });
+      if (!contactOk) throw new Error(contactData?.error || "Gagal mengambil kontak toko.");
+      const waNumber = contactData.waNumber || "";
       const lines = [
         "Halo Owner, ada masukan baru dari pelanggan:",
         `- Nama: ${name}`,
@@ -533,43 +576,37 @@
       window.open(waUrl, "_blank", "noopener");
 
       $("form-complaint").reset();
-      $("complaint-wrap").classList.add("hidden-panel");
+      $("complaint-wrap").classList.add("hidden");
     } catch (err) {
       console.error(err);
       errorEl.textContent = "Gagal mengirim masukan. Periksa koneksi internet Anda.";
-      errorEl.classList.remove("hidden-panel");
+      errorEl.classList.remove("hidden");
     } finally {
       setLoading("btn-send-complaint", "send-complaint-label", "send-complaint-spinner", false, "Kirim Masukan");
     }
   });
 
   // =======================================================================
-  // 5. MODAL PENGATURAN: VERIFIKASI PIN + EDIT DATA
-  // (PIN diverifikasi di server lewat /api/verify-pin — PIN asli tidak pernah
-  //  tersimpan/terlihat di sisi browser)
+  // MODAL PENGATURAN: VERIFIKASI PIN + EDIT DATA
   // =======================================================================
-  let verifiedPin = ""; // hanya disimpan sementara di memori tab ini, untuk dikirim ulang saat submit edit
+  let verifiedPin = "";
 
   $("btn-open-settings").addEventListener("click", () => openSettingsModal());
   $("btn-close-settings").addEventListener("click", () => closeSettingsModal());
   $("modal-backdrop").addEventListener("click", () => closeSettingsModal());
 
   function openSettingsModal() {
-    $("settings-pin-step").classList.remove("hidden-panel");
-    $("settings-edit-step").classList.add("hidden-panel");
+    $("settings-pin-step").classList.remove("hidden");
+    $("settings-edit-step").classList.add("hidden");
     $("settings-pin-input").value = "";
-    $("settings-pin-error").classList.add("hidden-panel");
+    $("settings-pin-error").classList.add("hidden");
     verifiedPin = "";
-    const modal = $("modal-settings");
-    modal.classList.remove("hidden-panel");
-    modal.classList.add("flex");
+    $("modal-settings").classList.add("open");
     setTimeout(() => $("settings-pin-input").focus(), 50);
   }
 
   function closeSettingsModal() {
-    const modal = $("modal-settings");
-    modal.classList.add("hidden-panel");
-    modal.classList.remove("flex");
+    $("modal-settings").classList.remove("open");
   }
 
   $("btn-verify-pin").addEventListener("click", async () => {
@@ -579,7 +616,7 @@
 
     if (!/^\d{4}$/.test(entered)) {
       errorEl.textContent = "PIN harus 4 angka.";
-      errorEl.classList.remove("hidden-panel");
+      errorEl.classList.remove("hidden");
       return;
     }
 
@@ -593,19 +630,24 @@
 
       if (data?.valid) {
         verifiedPin = entered;
+        const { data: contactData } = await callApi("/api/card-contact", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: cardId }),
+        });
         $("edit-storeName").value = currentCard.storeName || "";
         $("edit-reviewLink").value = currentCard.reviewLink || "";
-        $("edit-waNumber").value = currentCard.waNumber || "";
-        $("settings-pin-step").classList.add("hidden-panel");
-        $("settings-edit-step").classList.remove("hidden-panel");
+        $("edit-waNumber").value = contactData?.waNumber || "";
+        $("settings-pin-step").classList.add("hidden");
+        $("settings-edit-step").classList.remove("hidden");
       } else {
-        errorEl.textContent = "PIN salah. Silakan coba lagi.";
-        errorEl.classList.remove("hidden-panel");
+        errorEl.textContent = data?.error || "PIN salah. Silakan coba lagi.";
+        errorEl.classList.remove("hidden");
       }
     } catch (err) {
       console.error(err);
       errorEl.textContent = "Gagal memeriksa PIN. Coba lagi.";
-      errorEl.classList.remove("hidden-panel");
+      errorEl.classList.remove("hidden");
     } finally {
       btn.disabled = false;
     }
@@ -614,7 +656,7 @@
   $("form-edit").addEventListener("submit", async (e) => {
     e.preventDefault();
     const errorEl = $("edit-error");
-    errorEl.classList.add("hidden-panel");
+    errorEl.classList.add("hidden");
 
     const storeName = $("edit-storeName").value.trim();
     const reviewLink = $("edit-reviewLink").value.trim();
@@ -629,24 +671,21 @@
       });
 
       if (!ok) throw new Error(data?.error || "Gagal menyimpan perubahan");
-
       window.location.reload();
     } catch (err) {
       console.error(err);
       errorEl.textContent = err.message || "Gagal menyimpan perubahan. Silakan coba lagi.";
-      errorEl.classList.remove("hidden-panel");
+      errorEl.classList.remove("hidden");
       setLoading("btn-save-edit", "save-edit-label", "save-edit-spinner", false, "Simpan Perubahan");
     }
   });
 
-  // ---- Helper: state loading tombol ----
   function setLoading(btnId, labelId, spinnerId, isLoading, restoreLabel) {
     const btn = $(btnId);
     const label = $(labelId);
     const spinner = $(spinnerId);
     btn.disabled = isLoading;
-    btn.classList.toggle("opacity-70", isLoading);
-    spinner.classList.toggle("hidden-panel", !isLoading);
+    spinner.classList.toggle("hidden", !isLoading);
     if (!isLoading && restoreLabel) label.textContent = restoreLabel;
   }
 </script>

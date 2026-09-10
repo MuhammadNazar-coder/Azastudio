@@ -1,10 +1,11 @@
 // POST /api/activate
 // body: { id, storeName, reviewLink, waNumber, pin }
-// Membuat dokumen baru di Firestore. Menolak jika ID sudah dipakai
-// (mencegah orang lain menimpa kartu yang sudah aktif).
+// Membuat dokumen baru di Firestore (atau mengisi stok READY yang sudah
+// digenerate lewat dasbor admin). Menolak jika ID sudah aktif.
 const { db } = require("./_firebaseAdmin");
 const { hashPin } = require("./_hash");
 const { formatPhoneToIntl } = require("./_phone");
+const { bumpCounters } = require("./_counters");
 
 module.exports = async function handler(req, res) {
   if (req.method !== "POST") {
@@ -27,24 +28,40 @@ module.exports = async function handler(req, res) {
 
     const ref = db.collection("cards").doc(cardId);
     const existing = await ref.get();
-    if (existing.exists) {
+    const existingData = existing.exists ? existing.data() : null;
+    const alreadyActive = existingData && (existingData.status === "ACTIVE" || (!existingData.status && existingData.pinHash));
+    if (alreadyActive) {
       return res.status(409).json({ error: "Kartu ini sudah aktif" });
     }
+    const wasReadyStock = existingData && existingData.status === "READY";
 
     const normalizedWa = formatPhoneToIntl(waNumber);
     const pinHash = hashPin(pin, cardId);
+    const trimmedName = String(storeName).trim();
 
-    await ref.set({
-      storeName: String(storeName).trim(),
-      reviewLink: String(reviewLink).trim(),
-      waNumber: normalizedWa,
-      pinHash,
-      createdAt: new Date().toISOString(),
-    });
+    await ref.set(
+      {
+        status: "ACTIVE",
+        storeName: trimmedName,
+        storeNameLower: trimmedName.toLowerCase(),
+        reviewLink: String(reviewLink).trim(),
+        waNumber: normalizedWa,
+        pinHash,
+        totalScans: existingData ? Number(existingData.totalScans || 0) : 0,
+        lastScanned: existingData ? existingData.lastScanned || null : null,
+        createdAt: existingData ? existingData.createdAt || new Date().toISOString() : new Date().toISOString(),
+        activatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+
+    // Kartu yang tadinya stok READY -> geser ke active. Kartu yang dibuat
+    // spontan (tidak lewat dasbor) -> langsung tambah active saja.
+    await bumpCounters(wasReadyStock ? { ready: -1, active: 1 } : { active: 1 });
 
     return res.status(200).json({
       success: true,
-      storeName: String(storeName).trim(),
+      storeName: trimmedName,
       reviewLink: String(reviewLink).trim(),
       waNumber: normalizedWa,
     });

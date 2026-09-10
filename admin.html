@@ -1,0 +1,987 @@
+<!DOCTYPE html>
+<!--
+  =========================================================================
+  DASBOR ADMIN — Kartu Review Akrilik  (v2 — performance-optimized)
+  =========================================================================
+  CATATAN PERFORMA
+  -------------------------------------------------------------------------
+  - TIDAK memakai Tailwind CDN (compiler JS yang berat) — semua CSS di
+    bawah ditulis manual, hasilnya jauh lebih ringan & tanpa delay compile.
+  - Chart.js, qr-code-styling, JSZip, FileSaver TIDAK dimuat di awal.
+    Chart.js baru diminta browser setelah login berhasil (paralel, tidak
+    memblokir tampilan angka & tabel). QR libraries baru diminta browser
+    saat Anda benar-benar membuka fitur "Buat Stok" / "Cetak QR" — kalau
+    Anda cuma mau lihat statistik, library itu tidak pernah diunduh sama
+    sekali.
+  - Statistik & daftar kartu diambil dari counter + query bertahap
+    (cursor pagination) di server, BUKAN scan seluruh database tiap kali
+    dasbor dibuka — jadi tetap cepat walau jumlah kartu sudah ribuan.
+
+  CARA SETUP (sama seperti sebelumnya)
+    ADMIN_PASSWORD, ADMIN_SESSION_SECRET di Vercel Environment Variables.
+    Akses lewat  https://domain-anda.vercel.app/admin.html
+  =========================================================================
+-->
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+<title>Dasbor Admin — Kartu Review Akrilik</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #132320;
+    --bg: #F6F8F7;
+    --primary: #0E7C86;
+    --primary-dark: #0B5F67;
+    --primary-light: #E4F1F1;
+    --warn: #B5585E;
+    --warn-light: #F7EBEC;
+    --amber: #B45309;
+    --amber-light: #FEF3C7;
+    --sidebar-w: 232px;
+  }
+  * { box-sizing: border-box; }
+  html, body { min-height: 100vh; margin: 0; }
+  body {
+    font-family: 'Inter', sans-serif;
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    background: var(--bg);
+  }
+  h1, h2, h3 { font-family: 'Manrope', sans-serif; margin: 0; }
+  input, select, textarea, button { font-family: inherit; }
+  ::selection { background: rgba(14,124,134,0.2); }
+  .hidden { display: none !important; }
+  svg { display: block; }
+
+  /* ---------------- LOGIN ---------------- */
+  .login-page { min-height: 100vh; width: 100%; display: flex; align-items: center; justify-content: center; padding: 24px;
+    background: radial-gradient(circle at 15% 10%, rgba(14,124,134,0.10), transparent 45%), radial-gradient(circle at 85% 90%, rgba(14,124,134,0.08), transparent 40%), var(--bg); }
+  .login-box { width: 100%; max-width: 360px; background: rgba(255,255,255,0.75); backdrop-filter: blur(14px); border: 1px solid rgba(19,35,32,0.06);
+    border-radius: 24px; box-shadow: 0 1px 1px rgba(19,35,32,0.04), 0 8px 24px -8px rgba(19,35,32,0.15); padding: 36px 32px; animation: fadeUp .35s ease both; }
+  .brand-mark { width: 40px; height: 4px; border-radius: 999px; margin-bottom: 20px; background: linear-gradient(90deg, transparent, rgba(14,124,134,0.55), transparent); }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+  .field { margin-bottom: 16px; }
+  .field label { display: block; font-size: 12px; font-weight: 500; color: rgba(19,35,32,0.7); margin-bottom: 6px; }
+  .field input, .field select {
+    width: 100%; border: 1px solid rgba(19,35,32,0.1); background: rgba(255,255,255,0.85);
+    border-radius: 12px; padding: 11px 14px; font-size: 14px; transition: border-color .15s, box-shadow .15s; outline: none;
+  }
+  .field input::placeholder { color: rgba(19,35,32,0.3); }
+  .field input:focus, .field select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(14,124,134,0.15); }
+  .error-text { font-size: 12px; color: var(--warn); margin: 0 0 12px; line-height: 1.5; }
+
+  .btn { border: 0; border-radius: 12px; font-size: 14px; font-weight: 500; padding: 13px 18px; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px; transition: background-color .15s, opacity .15s, border-color .15s; }
+  .btn:disabled { opacity: 0.65; cursor: default; }
+  .btn-block { width: 100%; }
+  .btn-primary { background: var(--primary); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: var(--primary-dark); }
+  .btn-ghost { background: transparent; color: var(--ink); border: 1px solid rgba(19,35,32,0.12); }
+  .btn-ghost:hover:not(:disabled) { background: rgba(19,35,32,0.04); }
+  .btn-sm { padding: 8px 14px; font-size: 13px; border-radius: 10px; }
+  .btn-link { background: none; border: 0; color: var(--primary); font-size: 13px; font-weight: 500; cursor: pointer; padding: 0; }
+  .btn-link:hover { text-decoration: underline; }
+  .btn-link-warn { color: var(--warn); }
+
+  .spinner { border: 2.5px solid rgba(19,35,32,0.12); border-top-color: var(--primary); border-radius: 999px; width: 20px; height: 20px; animation: spin .7s linear infinite; flex-shrink: 0; }
+  .spinner-white { border-color: rgba(255,255,255,0.3); border-top-color: #fff; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---------------- APP SHELL ---------------- */
+  .shell { display: flex; min-height: 100vh; }
+
+  .sidebar { width: var(--sidebar-w); flex-shrink: 0; background: rgba(255,255,255,0.6); border-right: 1px solid rgba(19,35,32,0.06);
+    display: flex; flex-direction: column; padding: 24px 16px; position: sticky; top: 0; height: 100vh; }
+  .sidebar-brand { padding: 0 8px 20px; margin-bottom: 8px; border-bottom: 1px solid rgba(19,35,32,0.06); }
+  .sidebar-brand .brand-mark { margin-bottom: 12px; }
+  .sidebar-brand h1 { font-size: 15px; font-weight: 800; line-height: 1.3; }
+  .sidebar-brand p { font-size: 12px; color: rgba(19,35,32,0.45); margin-top: 2px; }
+
+  .nav-list { list-style: none; margin: 16px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; flex: 1; }
+  .nav-link { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; font-size: 13px; font-weight: 500;
+    color: rgba(19,35,32,0.55); text-decoration: none; cursor: pointer; transition: background-color .15s, color .15s; }
+  .nav-link svg { width: 17px; height: 17px; flex-shrink: 0; }
+  .nav-link:hover { background: rgba(19,35,32,0.05); color: var(--ink); }
+  .nav-link.active { background: var(--primary-light); color: var(--primary-dark); }
+
+  .sidebar-footer { border-top: 1px solid rgba(19,35,32,0.06); padding-top: 12px; }
+  .logout-link { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; font-size: 13px; font-weight: 500;
+    color: rgba(19,35,32,0.5); background: none; border: 0; cursor: pointer; width: 100%; text-align: left; transition: background-color .15s, color .15s; }
+  .logout-link:hover { background: var(--warn-light); color: var(--warn); }
+  .logout-link svg { width: 17px; height: 17px; }
+
+  .main { flex: 1; min-width: 0; padding: 28px 32px 60px; }
+  .main-header { margin-bottom: 24px; }
+  .main-header h2 { font-size: 22px; font-weight: 800; }
+  .main-header p { font-size: 13px; color: rgba(19,35,32,0.5); margin-top: 3px; }
+
+  section.block { margin-bottom: 40px; }
+  section.block h3 { font-size: 15px; font-weight: 700; margin-bottom: 2px; }
+  section.block > p.block-sub { font-size: 12.5px; color: rgba(19,35,32,0.5); margin: 2px 0 16px; }
+
+  .panel { background: rgba(255,255,255,0.72); border: 1px solid rgba(19,35,32,0.06); border-radius: 18px;
+    box-shadow: 0 1px 1px rgba(19,35,32,0.03), 0 6px 18px -8px rgba(19,35,32,0.1); }
+
+  /* ---------------- STAT CARDS ---------------- */
+  .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 16px; }
+  .stat-card { padding: 18px 20px; }
+  .stat-card .stat-label { font-size: 12px; color: rgba(19,35,32,0.5); display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+  .stat-card .stat-label svg { width: 14px; height: 14px; }
+  .stat-card .stat-value { font-family: 'Manrope', sans-serif; font-weight: 800; font-size: 28px; line-height: 1; }
+  .stat-ready .stat-value { color: var(--amber); }
+  .stat-active .stat-value { color: var(--primary); }
+
+  /* ---------------- CHART ---------------- */
+  .chart-wrap { padding: 20px 20px 16px; }
+  .chart-canvas-box { height: 220px; position: relative; margin-top: 8px; }
+  .chart-placeholder { display: flex; align-items: center; justify-content: center; height: 220px; color: rgba(19,35,32,0.35); font-size: 13px; gap: 8px; }
+
+  /* ---------------- GENERATE FORM ---------------- */
+  .gen-panel { padding: 24px; }
+  .row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+  .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .row-5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+  .color-field label { display: block; font-size: 11px; color: rgba(19,35,32,0.55); margin-bottom: 5px; }
+  .color-field input[type="color"] { width: 100%; height: 34px; border-radius: 8px; border: 1px solid rgba(19,35,32,0.1); padding: 2px; cursor: pointer; background: #fff; }
+  .divider { border-top: 1px solid rgba(19,35,32,0.08); margin: 18px 0; }
+  .gen-footer { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+  .qr-preview-box { border: 1px solid rgba(19,35,32,0.1); border-radius: 14px; padding: 8px; background: #fff; display: inline-block; }
+  .qr-preview-label { font-size: 11px; color: rgba(19,35,32,0.5); margin-bottom: 6px; text-align: center; }
+  .gen-hint { font-size: 11.5px; color: rgba(19,35,32,0.4); margin-top: 8px; line-height: 1.5; }
+
+  /* ---------------- TABLE ---------------- */
+  .table-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 20px; border-bottom: 1px solid rgba(19,35,32,0.06); }
+  .search-box { position: relative; flex: 1; min-width: 220px; max-width: 320px; }
+  .search-box svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); width: 15px; height: 15px; color: rgba(19,35,32,0.35); }
+  .search-box input { width: 100%; padding: 10px 14px 10px 34px; border-radius: 10px; border: 1px solid rgba(19,35,32,0.1); background: rgba(255,255,255,0.85); font-size: 13px; outline: none; transition: border-color .15s, box-shadow .15s; }
+  .search-box input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(14,124,134,0.15); }
+
+  table { width: 100%; border-collapse: collapse; }
+  thead th { text-align: left; font-size: 11.5px; font-weight: 600; color: rgba(19,35,32,0.45); text-transform: uppercase; letter-spacing: 0.03em; padding: 12px 20px; border-bottom: 1px solid rgba(19,35,32,0.06); }
+  tbody td { padding: 14px 20px; border-bottom: 1px solid rgba(19,35,32,0.05); font-size: 13.5px; vertical-align: middle; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover { background: rgba(19,35,32,0.015); }
+  .cell-id { font-weight: 600; font-family: 'Manrope', sans-serif; }
+  .cell-url code { font-size: 11.5px; color: rgba(19,35,32,0.4); word-break: break-all; }
+  .badge { font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 999px; display: inline-block; }
+  .badge-active { background: var(--primary-light); color: var(--primary-dark); }
+  .badge-ready { background: var(--amber-light); color: var(--amber); }
+  .scan-count { font-size: 12px; background: rgba(19,35,32,0.05); color: rgba(19,35,32,0.7); padding: 3px 9px; border-radius: 999px; font-weight: 600; }
+  .scan-date { font-size: 10.5px; color: rgba(19,35,32,0.35); margin-top: 3px; }
+  .row-actions { display: flex; gap: 14px; justify-content: flex-end; white-space: nowrap; }
+
+  .empty-state, .table-loading { text-align: center; padding: 48px 20px; color: rgba(19,35,32,0.4); font-size: 13px; }
+  .table-footer { padding: 16px 20px; text-align: center; border-top: 1px solid rgba(19,35,32,0.06); }
+
+  .skeleton-row td { padding: 16px 20px; }
+  .sk-bar { height: 14px; border-radius: 6px; background: linear-gradient(90deg, rgba(19,35,32,0.06), rgba(19,35,32,0.11), rgba(19,35,32,0.06)); background-size: 200% 100%; animation: shimmer 1.3s infinite; }
+  @keyframes shimmer { to { background-position: -200% 0; } }
+
+  /* ---------------- TOAST ---------------- */
+  .toast-stack { position: fixed; bottom: 20px; right: 20px; z-index: 100; display: flex; flex-direction: column; gap: 10px; }
+  .toast { background: var(--ink); color: #fff; padding: 12px 16px; border-radius: 12px; font-size: 13px; box-shadow: 0 8px 24px -8px rgba(19,35,32,0.4);
+    display: flex; align-items: center; gap: 10px; min-width: 220px; max-width: 320px; animation: toastIn .2s ease both; }
+  .toast.toast-error { background: var(--warn); }
+  .toast svg { width: 16px; height: 16px; flex-shrink: 0; }
+  @keyframes toastIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+  /* ---------------- CONFIRM MODAL ---------------- */
+  .modal { display: none; position: fixed; inset: 0; z-index: 90; align-items: center; justify-content: center; padding: 16px; }
+  .modal.open { display: flex; }
+  .modal-backdrop { position: absolute; inset: 0; background: rgba(19,35,32,0.4); backdrop-filter: blur(2px); }
+  .modal-box { position: relative; width: 100%; max-width: 360px; background: #fff; border-radius: 20px; padding: 24px; box-shadow: 0 8px 24px -8px rgba(19,35,32,0.25); animation: fadeUp .2s ease both; }
+  .modal-box h3 { font-size: 16px; font-weight: 800; margin-bottom: 8px; }
+  .modal-box p { font-size: 13.5px; color: rgba(19,35,32,0.6); line-height: 1.5; margin-bottom: 20px; }
+  .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+
+  @media (max-width: 860px) {
+    .shell { flex-direction: column; }
+    .sidebar { position: static; width: 100%; height: auto; flex-direction: row; align-items: center; padding: 12px 16px; overflow-x: auto; }
+    .sidebar-brand { display: none; }
+    .nav-list { flex-direction: row; margin: 0; }
+    .sidebar-footer { border-top: 0; padding-top: 0; margin-left: auto; }
+    .main { padding: 20px 16px 48px; }
+    .stat-grid { grid-template-columns: repeat(2, 1fr); }
+    .row-3, .row-2, .row-5 { grid-template-columns: 1fr 1fr; }
+    thead { display: none; }
+    tbody td { display: block; padding: 4px 16px; border-bottom: 0; }
+    tbody tr { display: block; padding: 12px 0; border-bottom: 1px solid rgba(19,35,32,0.06); }
+    .row-actions { justify-content: flex-start; padding-top: 8px; }
+  }
+</style>
+</head>
+<body>
+
+  <!-- ============ LOGIN ============ -->
+  <div id="view-login" class="login-page">
+    <div class="login-box">
+      <div class="brand-mark"></div>
+      <h1 style="font-size: 20px; font-weight: 800; margin-bottom: 4px;">Dasbor Admin</h1>
+      <p style="font-size: 13px; color: rgba(19,35,32,0.55); margin-bottom: 22px; line-height: 1.5;">Kartu Review Akrilik — masuk untuk mengelola stok &amp; data kartu.</p>
+      <form id="form-login">
+        <div class="field">
+          <label>Password Admin</label>
+          <input required type="password" id="login-password" placeholder="••••••••" autofocus />
+        </div>
+        <p id="login-error" class="hidden error-text"></p>
+        <button type="submit" id="btn-login" class="btn btn-primary btn-block">
+          <span id="login-label">Masuk</span>
+          <span id="login-spinner" class="hidden spinner spinner-white" style="width:15px;height:15px;"></span>
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ============ APP ============ -->
+  <div id="view-app" class="hidden shell">
+
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-mark"></div>
+        <h1>Dasbor Admin</h1>
+        <p>Kartu Review Akrilik</p>
+      </div>
+      <ul class="nav-list">
+        <li><a href="#overview" class="nav-link active" data-nav="overview">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6V11h-6v9Zm0-16v5h6V4h-6Z"/></svg>
+          Ringkasan
+        </a></li>
+        <li><a href="#generate" class="nav-link" data-nav="generate">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+          Buat Stok
+        </a></li>
+        <li><a href="#cards" class="nav-link" data-nav="cards">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2"/><path stroke-linecap="round" d="M3 10h18"/></svg>
+          Semua Kartu
+        </a></li>
+      </ul>
+      <div class="sidebar-footer">
+        <button id="btn-logout" class="logout-link">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4m6 14 5-5-5-5m5 5H9"/></svg>
+          Keluar
+        </button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="main-header">
+        <h2>Ringkasan</h2>
+        <p>Pantau performa kartu review akrilik Anda.</p>
+      </div>
+
+      <!-- ============ OVERVIEW ============ -->
+      <section id="overview" class="block">
+        <div class="stat-grid">
+          <div class="panel stat-card stat-ready">
+            <div class="stat-label">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2"/></svg>
+              Stok Siap Pakai
+            </div>
+            <div class="stat-value" id="stat-ready">–</div>
+          </div>
+          <div class="panel stat-card stat-active">
+            <div class="stat-label">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
+              Kartu Aktif
+            </div>
+            <div class="stat-value" id="stat-active">–</div>
+          </div>
+          <div class="panel stat-card">
+            <div class="stat-label">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2"/><path stroke-linecap="round" d="M3 10h18"/></svg>
+              Total Kartu
+            </div>
+            <div class="stat-value" id="stat-total">–</div>
+          </div>
+          <div class="panel stat-card">
+            <div class="stat-label">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M3 3v18h18M7 14l4-4 3 3 5-6"/></svg>
+              Total Scan
+            </div>
+            <div class="stat-value" id="stat-scans">–</div>
+          </div>
+        </div>
+
+        <div class="panel chart-wrap">
+          <h3>Tren Scan (7 Hari Terakhir)</h3>
+          <div class="chart-canvas-box" id="chart-box">
+            <div class="chart-placeholder" id="chart-placeholder">
+              <div class="spinner"></div> Memuat grafik…
+            </div>
+            <canvas id="scanChart" class="hidden"></canvas>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ GENERATE STOK ============ -->
+      <section id="generate" class="block">
+        <h3>Buat Stok Kartu Baru</h3>
+        <p class="block-sub">Kode dibuat otomatis, QR langsung terunduh untuk dicetak ke kartu akrilik.</p>
+
+        <div class="panel gen-panel">
+          <form id="form-generate">
+            <div class="row-3">
+              <div class="field">
+                <label>Jumlah Kartu</label>
+                <input required type="number" min="1" max="200" value="1" id="gen-qty" />
+              </div>
+              <div class="field">
+                <label>Prefix Kode</label>
+                <input type="text" id="gen-prefix" value="AKR" maxlength="6" style="text-transform: uppercase;" />
+              </div>
+              <div class="field">
+                <label>Format File</label>
+                <select id="qr-format">
+                  <option value="png" selected>PNG (1000px)</option>
+                  <option value="svg">SVG (Vektor)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="row-2">
+              <div class="field">
+                <label>Preset Desain</label>
+                <select id="qr-theme-preset">
+                  <option value="modern_teal" selected>Teal Modern (sesuai warna kartu)</option>
+                  <option value="premium_gold">Emas Elegan</option>
+                  <option value="google_gradient">Google Gradient</option>
+                  <option value="classic_black">Hitam Klasik</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Logo di Tengah QR</label>
+                <select id="qr-logo-option">
+                  <option value="none" selected>Tanpa Logo</option>
+                  <option value="google_g">Logo "G" Google</option>
+                  <option value="custom">Upload Logo Sendiri</option>
+                </select>
+              </div>
+            </div>
+
+            <div id="custom-logo-wrap" class="field hidden">
+              <label>File Logo (PNG/SVG)</label>
+              <input type="file" id="qr-custom-logo" accept="image/*" style="font-size: 12px;" />
+            </div>
+
+            <div class="row-5">
+              <div class="color-field"><label>Warna 1</label><input type="color" id="qr-dot-color" value="#0E7C86" /></div>
+              <div class="color-field"><label>Warna 2</label><input type="color" id="qr-dot-color-2" value="#0B5F67" /></div>
+              <div class="color-field"><label>Latar</label><input type="color" id="qr-bg-color" value="#FFFFFF" /></div>
+              <div class="field" style="margin: 0;">
+                <label style="font-size: 11px; color: rgba(19,35,32,0.55);">Gaya Titik</label>
+                <select id="qr-dot-style" style="padding: 7px 10px; font-size: 12.5px;">
+                  <option value="extra-rounded" selected>Extra Rounded</option>
+                  <option value="classy">Classy</option>
+                  <option value="dots">Dots</option>
+                  <option value="rounded">Rounded</option>
+                  <option value="square">Square</option>
+                </select>
+              </div>
+              <div class="field" style="margin: 0;">
+                <label style="font-size: 11px; color: rgba(19,35,32,0.55);">Gaya Sudut</label>
+                <select id="qr-corner-style" style="padding: 7px 10px; font-size: 12.5px;">
+                  <option value="extra-rounded" selected>Rounded</option>
+                  <option value="square">Kotak</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="gen-footer">
+              <div>
+                <p class="qr-preview-label">Preview</p>
+                <div class="qr-preview-box" id="qr-preview"></div>
+              </div>
+              <div style="flex: 1; min-width: 200px;">
+                <p id="generate-error" class="hidden error-text"></p>
+                <button type="submit" id="btn-generate" class="btn btn-primary btn-block">
+                  <span id="generate-label">Buat Stok &amp; Unduh QR</span>
+                  <span id="generate-spinner" class="hidden spinner spinner-white" style="width:15px;height:15px;"></span>
+                </button>
+                <p class="gen-hint">Kalau lebih dari 1 kartu, semua QR otomatis dibungkus jadi satu file ZIP.</p>
+              </div>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- ============ TABEL KARTU ============ -->
+      <section id="cards" class="block">
+        <h3>Semua Kartu</h3>
+        <p class="block-sub">Cari, tinjau, cetak ulang QR, atau hapus kartu.</p>
+
+        <div class="panel">
+          <div class="table-toolbar">
+            <div class="search-box">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path stroke-linecap="round" d="m20 20-3.5-3.5"/></svg>
+              <input type="search" id="search-input" placeholder="Cari ID kartu / nama toko…" />
+            </div>
+            <a href="/api/admin-export" class="btn-link">Ekspor CSV</a>
+          </div>
+          <div style="overflow-x: auto;">
+            <table>
+              <thead>
+                <tr>
+                  <th>ID Kartu</th>
+                  <th>Status</th>
+                  <th>Nama Toko</th>
+                  <th>Link Review</th>
+                  <th>Scan</th>
+                  <th>URL Kartu</th>
+                  <th style="text-align:right;">Aksi</th>
+                </tr>
+              </thead>
+              <tbody id="table-body"></tbody>
+            </table>
+          </div>
+          <div id="table-footer" class="table-footer hidden">
+            <button id="btn-load-more" class="btn btn-ghost btn-sm">Muat Lebih Banyak</button>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- ============ CONFIRM MODAL ============ -->
+  <div id="modal-confirm" class="modal">
+    <div class="modal-backdrop" id="confirm-backdrop"></div>
+    <div class="modal-box">
+      <h3 id="confirm-title">Hapus kartu?</h3>
+      <p id="confirm-message">Tindakan ini tidak bisa dibatalkan.</p>
+      <div class="modal-actions">
+        <button id="confirm-cancel" class="btn btn-ghost btn-sm">Batal</button>
+        <button id="confirm-ok" class="btn btn-primary btn-sm" style="background: var(--warn);">Hapus</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ TOAST ============ -->
+  <div class="toast-stack" id="toast-stack"></div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  async function callApi(path, options) {
+    const res = await fetch(path, options);
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, data };
+  }
+
+  function setLoading(btnId, labelId, spinnerId, isLoading) {
+    const btn = $(btnId);
+    btn.disabled = isLoading;
+    $(spinnerId).classList.toggle("hidden", !isLoading);
+  }
+
+  // ---- Lazy-load helper: script hanya diunduh sekali, saat benar-benar dibutuhkan ----
+  const loadedScripts = new Map();
+  function loadScript(src) {
+    if (loadedScripts.has(src)) return loadedScripts.get(src);
+    const p = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error(`Gagal memuat ${src}`));
+      document.head.appendChild(s);
+    });
+    loadedScripts.set(src, p);
+    return p;
+  }
+
+  // ---- Toast ----
+  function showToast(message, type = "info") {
+    const el = document.createElement("div");
+    el.className = `toast ${type === "error" ? "toast-error" : ""}`;
+    el.innerHTML = `<span>${message}</span>`;
+    $("toast-stack").appendChild(el);
+    setTimeout(() => el.remove(), 3500);
+  }
+
+  // ---- Confirm modal (ganti native confirm()) ----
+  function askConfirm(title, message) {
+    return new Promise((resolve) => {
+      $("confirm-title").textContent = title;
+      $("confirm-message").textContent = message;
+      const modal = $("modal-confirm");
+      modal.classList.add("open");
+
+      function cleanup(result) {
+        modal.classList.remove("open");
+        $("confirm-ok").removeEventListener("click", onOk);
+        $("confirm-cancel").removeEventListener("click", onCancel);
+        $("confirm-backdrop").removeEventListener("click", onCancel);
+        resolve(result);
+      }
+      function onOk() { cleanup(true); }
+      function onCancel() { cleanup(false); }
+
+      $("confirm-ok").addEventListener("click", onOk);
+      $("confirm-cancel").addEventListener("click", onCancel);
+      $("confirm-backdrop").addEventListener("click", onCancel);
+    });
+  }
+
+  function showLogin() {
+    $("view-login").classList.remove("hidden");
+    $("view-app").classList.add("hidden");
+  }
+  function showApp() {
+    $("view-login").classList.add("hidden");
+    $("view-app").classList.remove("hidden");
+  }
+
+  // =======================================================================
+  // LOGIN
+  // =======================================================================
+  $("form-login").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const password = $("login-password").value;
+    const errorEl = $("login-error");
+    errorEl.classList.add("hidden");
+    setLoading("btn-login", "login-label", "login-spinner", true);
+
+    try {
+      const { ok, data } = await callApi("/api/admin-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (!ok) throw new Error(data?.error || "Password salah.");
+      showApp();
+      loadDashboard();
+    } catch (err) {
+      errorEl.textContent = err.message;
+      errorEl.classList.remove("hidden");
+    } finally {
+      setLoading("btn-login", "login-label", "login-spinner", false);
+    }
+  });
+
+  $("btn-logout").addEventListener("click", async () => {
+    await callApi("/api/admin-logout", { method: "POST" });
+    location.reload();
+  });
+
+  async function init() {
+    const { ok, data } = await callApi("/api/admin-stats");
+    if (ok) {
+      showApp();
+      renderStats(data);
+      loadList();
+    } else {
+      showLogin();
+    }
+  }
+
+  async function loadDashboard() {
+    const { data } = await callApi("/api/admin-stats");
+    renderStats(data);
+    loadList();
+  }
+
+  async function refreshStats() {
+    const { data } = await callApi("/api/admin-stats");
+    renderStats(data);
+  }
+
+  // ---- Scroll-spy sederhana untuk sidebar ----
+  document.querySelectorAll(".nav-link").forEach((link) => {
+    link.addEventListener("click", () => {
+      document.querySelectorAll(".nav-link").forEach((l) => l.classList.remove("active"));
+      link.classList.add("active");
+    });
+  });
+
+  // =======================================================================
+  // STATISTIK & GRAFIK (Chart.js di-lazy-load, tidak memblokir tampilan awal)
+  // =======================================================================
+  let chartInstance = null;
+  let chartReadyPromise = null;
+
+  function renderStats(data) {
+    if (!data) return;
+    $("stat-ready").textContent = data.ready ?? 0;
+    $("stat-active").textContent = data.active ?? 0;
+    $("stat-total").textContent = data.total ?? 0;
+    $("stat-scans").textContent = data.totalScans ?? 0;
+    renderChart(data);
+  }
+
+  async function renderChart(data) {
+    if (!chartReadyPromise) {
+      chartReadyPromise = loadScript("https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js");
+    }
+    try {
+      await chartReadyPromise;
+    } catch (err) {
+      $("chart-placeholder").textContent = "Grafik gagal dimuat (cek koneksi internet).";
+      return;
+    }
+
+    $("chart-placeholder").classList.add("hidden");
+    $("scanChart").classList.remove("hidden");
+
+    const ctx = $("scanChart").getContext("2d");
+    if (chartInstance) chartInstance.destroy();
+    chartInstance = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels: data.chartLabels || [],
+        datasets: [{
+          label: "Jumlah Scan",
+          data: data.chartData || [],
+          borderColor: "#0E7C86",
+          backgroundColor: "rgba(14,124,134,0.12)",
+          borderWidth: 3,
+          fill: true,
+          tension: 0.35,
+          pointBackgroundColor: "#0B5F67",
+          pointRadius: 4,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
+        plugins: { legend: { display: false } },
+      },
+    });
+  }
+
+  // =======================================================================
+  // TABEL: SEARCH + CURSOR PAGINATION ("Muat Lebih Banyak") + AKSI
+  // =======================================================================
+  let nextCursor = null;
+  let searchTimer;
+
+  $("search-input").addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => loadList(), 250);
+  });
+
+  $("btn-load-more").addEventListener("click", () => loadList({ append: true }));
+
+  function renderSkeletonRows() {
+    const tbody = $("table-body");
+    tbody.innerHTML = Array.from({ length: 5 }).map(() => `
+      <tr class="skeleton-row">
+        <td><div class="sk-bar" style="width:70px;"></div></td>
+        <td><div class="sk-bar" style="width:60px;"></div></td>
+        <td><div class="sk-bar" style="width:120px;"></div></td>
+        <td><div class="sk-bar" style="width:40px;"></div></td>
+        <td><div class="sk-bar" style="width:160px;"></div></td>
+        <td><div class="sk-bar" style="width:80px; margin-left:auto;"></div></td>
+      </tr>`).join("");
+  }
+
+  async function loadList(opts = {}) {
+    const append = !!opts.append;
+    const q = $("search-input").value.trim();
+
+    if (!append) renderSkeletonRows();
+
+    const cursorParam = append && nextCursor ? `&cursor=${encodeURIComponent(nextCursor)}` : "";
+    const { ok, data } = await callApi(`/api/admin-list?q=${encodeURIComponent(q)}${cursorParam}`);
+    if (!ok) {
+      if (!append) $("table-body").innerHTML = `<tr><td colspan="6" class="empty-state">Gagal memuat data. Coba muat ulang halaman.</td></tr>`;
+      return;
+    }
+
+    nextCursor = data.nextCursor || null;
+    renderTable(data.items, { append });
+    $("table-footer").classList.toggle("hidden", !nextCursor);
+  }
+
+  function renderTable(items, { append }) {
+    const tbody = $("table-body");
+    if (!append) tbody.innerHTML = "";
+
+    if (!append && (!items || !items.length)) {
+      tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Belum ada data. Buat stok baru di atas.</td></tr>`;
+      return;
+    }
+
+    const rowsHtml = items.map((it) => {
+      const statusBadge = it.status === "ACTIVE"
+        ? `<span class="badge badge-active">Aktif</span>`
+        : `<span class="badge badge-ready">Stok Siap</span>`;
+      const targetUrl = `${window.location.origin}/?id=${it.id}`;
+      const reviewLinkCell = it.reviewLink
+        ? `<a href="${it.reviewLink}" target="_blank" rel="noopener" class="btn-link" style="font-size:12.5px;">Buka Link ↗</a>`
+        : `<span style="color: rgba(19,35,32,0.3);">-</span>`;
+      const lastScanned = it.lastScanned
+        ? new Date(it.lastScanned).toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" })
+        : "-";
+      return `
+        <tr>
+          <td class="cell-id">${it.id}</td>
+          <td>${statusBadge}</td>
+          <td>${it.storeName || "-"}</td>
+          <td>${reviewLinkCell}</td>
+          <td>
+            <span class="scan-count">${it.totalScans}</span>
+            <div class="scan-date">${lastScanned}</div>
+          </td>
+          <td class="cell-url"><code>${targetUrl}</code></td>
+          <td>
+            <div class="row-actions">
+              <button data-id="${it.id}" data-url="${targetUrl}" class="btn-link btn-print-qr">Cetak QR</button>
+              <button data-id="${it.id}" class="btn-link btn-link-warn btn-delete">Hapus</button>
+            </div>
+          </td>
+        </tr>`;
+    }).join("");
+
+    tbody.insertAdjacentHTML("beforeend", rowsHtml);
+  }
+
+  $("table-body").addEventListener("click", async (e) => {
+    const delBtn = e.target.closest(".btn-delete");
+    if (delBtn) {
+      const id = delBtn.dataset.id;
+      const confirmed = await askConfirm("Hapus kartu?", `Kartu ${id} akan dihapus permanen dan tidak bisa dikembalikan.`);
+      if (!confirmed) return;
+
+      const { ok } = await callApi("/api/admin-delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      if (ok) {
+        showToast(`Kartu ${id} dihapus.`);
+        nextCursor = null;
+        loadList();
+        refreshStats();
+      } else {
+        showToast("Gagal menghapus kartu.", "error");
+      }
+      return;
+    }
+
+    const printBtn = e.target.closest(".btn-print-qr");
+    if (printBtn) {
+      const id = printBtn.dataset.id;
+      const url = printBtn.dataset.url;
+      printBtn.textContent = "Menyiapkan…";
+      try {
+        await ensureQrLibsLoaded();
+        const format = $("qr-format").value;
+        const qr = new QRCodeStyling(buildQrOptions(url, 1000));
+        const blob = await qr.getRawData(format);
+        saveAs(blob, `${id}.${format}`);
+      } catch (err) {
+        console.error(err);
+        showToast("Gagal membuat QR. Cek koneksi internet.", "error");
+      } finally {
+        printBtn.textContent = "Cetak QR";
+      }
+    }
+  });
+
+  // =======================================================================
+  // STUDIO DESAIN QR (qr-code-styling / JSZip / FileSaver di-lazy-load)
+  // =======================================================================
+  const GOOGLE_G_LOGO = "data:image/svg+xml;base64," + btoa(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+      <path fill="#4285F4" d="M45.1 24.5c0-1.6-.1-3.1-.4-4.6H24v9.1h11.9c-.5 2.8-2.1 5.2-4.4 6.8v5.6h7.6C43.5 37.4 45.1 31.4 45.1 24.5z"/>
+      <path fill="#34A853" d="M24 46c6.1 0 11.2-2 14.9-5.5l-7.3-5.7c-2 1.4-4.6 2.2-7.6 2.2-5.9 0-10.9-4-12.7-9.3H3.5v5.8C7.1 41 14.9 46 24 46z"/>
+      <path fill="#FBBC05" d="M11.3 27.7c-.5-1.4-.7-2.8-.7-4.3s.3-2.9.7-4.3v-5.8H3.5C1.9 16.6 1 20.2 1 24s.9 7.4 2.5 10.7l7.8-5.9z"/>
+      <path fill="#EA4335" d="M24 10.4c3.3 0 6.2 1.1 8.5 3.3l6.4-6.4C35.2 3.8 30.1 2 24 2 14.9 2 7.1 7 3.5 13.3l7.8 5.8c1.8-5.3 6.8-9.3 12.7-9.3z"/>
+    </svg>`);
+
+  let customLogoBase64 = "";
+  let qrLibsPromise = null;
+  let qrPreviewInstance = null;
+
+  function ensureQrLibsLoaded() {
+    if (!qrLibsPromise) {
+      qrLibsPromise = Promise.all([
+        loadScript("https://cdn.jsdelivr.net/npm/qr-code-styling@1.9.2/lib/qr-code-styling.js"),
+        loadScript("https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"),
+        loadScript("https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"),
+      ]);
+    }
+    return qrLibsPromise;
+  }
+
+  function buildQrOptions(dataUrl, size) {
+    const c1 = $("qr-dot-color").value;
+    const c2 = $("qr-dot-color-2").value;
+    const bg = $("qr-bg-color").value;
+    const dotStyle = $("qr-dot-style").value;
+    const cornerStyle = $("qr-corner-style").value;
+    const logoOpt = $("qr-logo-option").value;
+
+    let image = "";
+    if (logoOpt === "google_g") image = GOOGLE_G_LOGO;
+    else if (logoOpt === "custom") image = customLogoBase64;
+
+    return {
+      width: size,
+      height: size,
+      data: dataUrl,
+      image,
+      margin: 0,
+      qrOptions: { typeNumber: 0, mode: "Byte", errorCorrectionLevel: "H" },
+      imageOptions: { hideBackgroundDots: true, imageSize: 0.22, margin: 2, crossOrigin: "anonymous" },
+      dotsOptions: {
+        type: dotStyle,
+        color: c1,
+        gradient: { type: "linear", rotation: 0, colorStops: [{ offset: 0, color: c1 }, { offset: 1, color: c2 }] },
+      },
+      backgroundOptions: { color: bg },
+      cornersSquareOptions: { type: cornerStyle === "square" ? "square" : "extra-rounded", color: c1 },
+      cornersDotOptions: { type: cornerStyle === "square" ? "square" : "dot", color: c2 },
+    };
+  }
+
+  // Preview QR studio baru dirender saat form generate pertama kali disentuh
+  // (bukan langsung saat halaman dibuka) supaya library QR benar-benar lazy.
+  let previewInitialized = false;
+  async function ensurePreviewInitialized() {
+    if (previewInitialized) return;
+    previewInitialized = true;
+    await ensureQrLibsLoaded();
+    qrPreviewInstance = new QRCodeStyling(buildQrOptions(`${window.location.origin}/?id=CONTOH01`, 160));
+    qrPreviewInstance.append($("qr-preview"));
+  }
+
+  function updatePreview() {
+    if (!qrPreviewInstance) return;
+    qrPreviewInstance.update(buildQrOptions(`${window.location.origin}/?id=CONTOH01`, 160));
+  }
+
+  ["qr-dot-color", "qr-dot-color-2", "qr-bg-color", "qr-dot-style", "qr-corner-style"].forEach((id) => {
+    $(id).addEventListener("focus", ensurePreviewInitialized, { once: true });
+    $(id).addEventListener("input", async () => { await ensurePreviewInitialized(); updatePreview(); });
+    $(id).addEventListener("change", async () => { await ensurePreviewInitialized(); updatePreview(); });
+  });
+  $("form-generate").addEventListener("mouseenter", ensurePreviewInitialized, { once: true });
+  $("form-generate").addEventListener("focusin", ensurePreviewInitialized, { once: true });
+
+  const QR_PRESETS = {
+    modern_teal: { c1: "#0E7C86", c2: "#0B5F67", bg: "#FFFFFF", dot: "extra-rounded", corner: "extra-rounded" },
+    premium_gold: { c1: "#D4AF37", c2: "#AA7C11", bg: "#FFFFFF", dot: "classy", corner: "extra-rounded" },
+    google_gradient: { c1: "#4285F4", c2: "#34A853", bg: "#FFFFFF", dot: "square", corner: "square" },
+    classic_black: { c1: "#111111", c2: "#111111", bg: "#FFFFFF", dot: "rounded", corner: "extra-rounded" },
+  };
+
+  $("qr-theme-preset").addEventListener("change", async function () {
+    const p = QR_PRESETS[this.value];
+    if (!p) return;
+    $("qr-dot-color").value = p.c1;
+    $("qr-dot-color-2").value = p.c2;
+    $("qr-bg-color").value = p.bg;
+    $("qr-dot-style").value = p.dot;
+    $("qr-corner-style").value = p.corner;
+    await ensurePreviewInitialized();
+    updatePreview();
+  });
+
+  $("qr-logo-option").addEventListener("change", async function () {
+    $("custom-logo-wrap").classList.toggle("hidden", this.value !== "custom");
+    await ensurePreviewInitialized();
+    updatePreview();
+  });
+
+  $("qr-custom-logo").addEventListener("change", function (e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async (evt) => {
+      customLogoBase64 = evt.target.result;
+      await ensurePreviewInitialized();
+      updatePreview();
+    };
+    reader.readAsDataURL(file);
+  });
+
+  // =======================================================================
+  // GENERATE STOK + UNDUH QR (SATU FILE ATAU ZIP)
+  // =======================================================================
+  $("form-generate").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const qty = $("gen-qty").value;
+    const prefix = $("gen-prefix").value;
+    const errorEl = $("generate-error");
+    errorEl.classList.add("hidden");
+    setLoading("btn-generate", "generate-label", "generate-spinner", true);
+
+    try {
+      await ensureQrLibsLoaded();
+
+      const { ok, data } = await callApi("/api/admin-generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ qty, prefix }),
+      });
+      if (!ok) throw new Error(data?.error || "Gagal membuat stok baru.");
+
+      await downloadBatchQr(data.created);
+      showToast(`${data.created.length} kartu berhasil dibuat.`);
+      nextCursor = null;
+      loadList();
+      refreshStats();
+    } catch (err) {
+      errorEl.textContent = err.message;
+      errorEl.classList.remove("hidden");
+    } finally {
+      setLoading("btn-generate", "generate-label", "generate-spinner", false);
+    }
+  });
+
+  async function downloadBatchQr(codes) {
+    const format = $("qr-format").value;
+
+    if (codes.length === 1) {
+      const url = `${window.location.origin}/?id=${codes[0]}`;
+      const qr = new QRCodeStyling(buildQrOptions(url, 1000));
+      const blob = await qr.getRawData(format);
+      saveAs(blob, `${codes[0]}.${format}`);
+      return;
+    }
+
+    const zip = new JSZip();
+    await Promise.all(codes.map(async (code) => {
+      const url = `${window.location.origin}/?id=${code}`;
+      const qr = new QRCodeStyling(buildQrOptions(url, 1000));
+      const blob = await qr.getRawData(format);
+      zip.file(`${code}.${format}`, blob);
+    }));
+    const content = await zip.generateAsync({ type: "blob" });
+    saveAs(content, `QR_Batch_${codes.length}_Kartu.zip`);
+  }
+
+  // =======================================================================
+  // INGAT PREFERENSI DESAIN QR (localStorage — cuma di browser ini, bukan
+  // data sensitif, tidak pernah dikirim ke server)
+  // =======================================================================
+  const QR_PREF_IDS = ["qr-format", "qr-theme-preset", "qr-logo-option", "qr-dot-color", "qr-dot-color-2", "qr-bg-color", "qr-dot-style", "qr-corner-style"];
+
+  function restoreQrPrefs() {
+    QR_PREF_IDS.forEach((id) => {
+      const saved = localStorage.getItem(`aza_pref_${id}`);
+      if (saved) $(id).value = saved;
+    });
+    $("custom-logo-wrap").classList.toggle("hidden", $("qr-logo-option").value !== "custom");
+  }
+
+  $("form-generate").addEventListener("change", (e) => {
+    if (QR_PREF_IDS.includes(e.target.id)) {
+      localStorage.setItem(`aza_pref_${e.target.id}`, e.target.value);
+    }
+  });
+
+  restoreQrPrefs();
+
+  init();
+</script>
+</body>
+</html>

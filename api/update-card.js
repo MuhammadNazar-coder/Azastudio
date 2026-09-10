@@ -32,7 +32,10 @@ module.exports = async function handler(req, res) {
     }
 
     const updates = {};
-    if (storeName) updates.storeName = String(storeName).trim();
+    if (storeName) {
+      updates.storeName = String(storeName).trim();
+      updates.storeNameLower = updates.storeName.toLowerCase();
+    }
     if (reviewLink) updates.reviewLink = String(reviewLink).trim();
     if (waNumber) updates.waNumber = formatPhoneToIntl(waNumber);
 
