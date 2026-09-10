@@ -3,8 +3,8 @@
 // untuk grafik tren di dasbor admin). Endpoint publik (dipanggil browser
 // pelanggan), jadi selalu balas 200 walau gagal — jangan pernah mengganggu
 // pengalaman pelanggan hanya karena tracking gagal.
-const { db, admin } = require("./_firebaseAdmin");
-const { bumpCounters } = require("./_counters");
+const { db, admin } = require("../lib/firebaseAdmin");
+const { bumpCounters } = require("../lib/counters");
 
 module.exports = async function handler(req, res) {
   if (req.method !== "POST") {

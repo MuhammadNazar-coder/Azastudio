@@ -4,9 +4,9 @@
 // halaman kartu pertama kali dibuka). Dibatasi per-IP supaya tetap tidak
 // bisa dipakai untuk mengumpulkan nomor WA secara massal walau seseorang
 // tahu pola ID kartunya.
-const { db } = require("./_firebaseAdmin");
-const { checkRateLimit } = require("./_rateLimit");
-const { getClientIp } = require("./_requestIp");
+const { db } = require("../lib/firebaseAdmin");
+const { checkRateLimit } = require("../lib/rateLimit");
+const { getClientIp } = require("../lib/requestIp");
 
 const MAX_ATTEMPTS = 20;
 const WINDOW_MS = 10 * 60 * 1000; // 10 menit

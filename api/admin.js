@@ -18,10 +18,10 @@
 //   POST /api/admin?action=delete   { id }
 // =============================================================================
 const crypto = require("crypto");
-const { db } = require("./_firebaseAdmin");
-const { requireAuth, createSessionCookie, clearSessionCookie } = require("./_adminAuth");
-const { checkRateLimit, resetRateLimit } = require("./_rateLimit");
-const { getCounters, allocateSequence, bumpCounters } = require("./_counters");
+const { db } = require("../lib/firebaseAdmin");
+const { requireAuth, createSessionCookie, clearSessionCookie } = require("../lib/adminAuth");
+const { checkRateLimit, resetRateLimit } = require("../lib/rateLimit");
+const { getCounters, allocateSequence, bumpCounters } = require("../lib/counters");
 
 module.exports = async function handler(req, res) {
   const action = String(req.query.action || "").trim();

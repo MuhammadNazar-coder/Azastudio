@@ -232,11 +232,11 @@
         <form id="form-activation">
           <div class="field">
             <label>Nama Toko</label>
-            <input required type="text" id="act-storeName" placeholder="Contoh: Akrilik Jaya Makmur" />
+            <input required type="text" id="act-storeName" maxlength="80" placeholder="Contoh: Akrilik Jaya Makmur" />
           </div>
           <div class="field">
             <label>Link Google Review</label>
-            <input required type="url" id="act-reviewLink" placeholder="https://g.page/r/..." />
+            <input required type="url" id="act-reviewLink" maxlength="300" placeholder="https://g.page/r/..." />
           </div>
           <div class="field">
             <label>Nomor WhatsApp Owner</label>
@@ -314,7 +314,7 @@
               </div>
               <div class="field file-field">
                 <label>Foto Bukti (Opsional)</label>
-                <input type="file" id="cx-photo" accept="image/*" capture="environment" />
+                <input type="file" id="cx-photo" accept="image/*" />
               </div>
 
               <p id="complaint-error" class="hidden error-text"></p>
@@ -358,11 +358,11 @@
         <form id="form-edit">
           <div class="field">
             <label>Nama Toko</label>
-            <input required type="text" id="edit-storeName" style="background: #fff;" />
+            <input required type="text" id="edit-storeName" maxlength="80" style="background: #fff;" />
           </div>
           <div class="field">
             <label>Link Google Review</label>
-            <input required type="url" id="edit-reviewLink" style="background: #fff;" />
+            <input required type="url" id="edit-reviewLink" maxlength="300" style="background: #fff;" />
           </div>
           <div class="field">
             <label>Nomor WhatsApp Owner</label>
@@ -505,7 +505,31 @@
     window.open(url, "_blank", "noopener");
   });
 
+  // Nomor WA & upload foto disiapkan LEBIH AWAL (bukan saat tombol "Kirim"
+  // ditekan), supaya begitu tombol ditekan, jeda sebelum WhatsApp terbuka
+  // seminimal mungkin. Kalau ada jeda proses di antara "tap tombol" dan
+  // "buka WhatsApp", Chrome di Android sering tidak langsung lempar ke
+  // aplikasi WhatsApp — malah menampilkan halaman web perantara
+  // (api.whatsapp.com) yang minta ditekan "Buka aplikasi" secara manual.
+  let waNumberPromise = null;
+  function prefetchWaNumber() {
+    if (waNumberPromise) return waNumberPromise;
+    waNumberPromise = callApi("/api/card-contact", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: cardId }),
+    }).then(({ ok, data }) => (ok ? data.waNumber || "" : null));
+    return waNumberPromise;
+  }
+
+  let photoUploadPromise = null;
+  $("cx-photo").addEventListener("change", () => {
+    const file = $("cx-photo").files?.[0];
+    photoUploadPromise = file ? uploadPhotoToCloudinary(file).catch(() => null) : null;
+  });
+
   $("btn-unsatisfied").addEventListener("click", () => {
+    prefetchWaNumber(); // mulai ambil nomor WA di background begitu panel komplain dibuka
     const wrap = $("complaint-wrap");
     const isHidden = wrap.classList.contains("hidden");
     if (isHidden) {
@@ -554,16 +578,16 @@
     setLoading("btn-send-complaint", "send-complaint-label", "send-complaint-spinner", true);
 
     try {
-      let photoUrl = "";
-      if (file) photoUrl = await uploadPhotoToCloudinary(file);
+      // Foto & nomor WA harusnya sudah (atau hampir) selesai diambil di
+      // background sejak tadi (lihat prefetchWaNumber / listener "change"
+      // di file foto) — di titik ini tinggal menunggu sisa proses yang
+      // belum kelar, idealnya nyaris instan.
+      const [photoUrl, waNumber] = await Promise.all([
+        file ? (photoUploadPromise || uploadPhotoToCloudinary(file)) : Promise.resolve(""),
+        prefetchWaNumber(),
+      ]);
+      if (!waNumber) throw new Error("Gagal mengambil kontak toko.");
 
-      const { ok: contactOk, data: contactData } = await callApi("/api/card-contact", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: cardId }),
-      });
-      if (!contactOk) throw new Error(contactData?.error || "Gagal mengambil kontak toko.");
-      const waNumber = contactData.waNumber || "";
       const lines = [
         "Halo Owner, ada masukan baru dari pelanggan:",
         `- Nama: ${name}`,
@@ -573,7 +597,12 @@
       const message = lines.join("\n");
 
       const waUrl = `https://wa.me/${waNumber}?text=${encodeURIComponent(message)}`;
-      window.open(waUrl, "_blank", "noopener");
+
+      // Navigasi langsung di tab yang sama (bukan window.open ke tab baru).
+      // Ini yang paling andal supaya Android/Chrome langsung serah-terima
+      // ke aplikasi WhatsApp tanpa halaman perantara — window.open ke tab
+      // baru lebih sering dianggap bukan "klik langsung" oleh browser.
+      window.location.href = waUrl;
 
       $("form-complaint").reset();
       $("complaint-wrap").classList.add("hidden");

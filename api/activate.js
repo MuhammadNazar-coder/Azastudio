@@ -2,10 +2,16 @@
 // body: { id, storeName, reviewLink, waNumber, pin }
 // Membuat dokumen baru di Firestore (atau mengisi stok READY yang sudah
 // digenerate lewat dasbor admin). Menolak jika ID sudah aktif.
-const { db } = require("./_firebaseAdmin");
-const { hashPin } = require("./_hash");
-const { formatPhoneToIntl } = require("./_phone");
-const { bumpCounters } = require("./_counters");
+//
+// Semua input divalidasi ketat di sini (bukan cuma di browser), karena
+// endpoint ini PUBLIK (siapa saja bisa panggil tanpa login) dan hasilnya
+// (storeName, id, reviewLink) nanti ditampilkan di dasbor admin — kalau
+// tidak dibatasi karakternya, bisa jadi celah XSS ke sesi admin.
+const { db } = require("../lib/firebaseAdmin");
+const { hashPin } = require("../lib/hash");
+const { formatPhoneToIntl } = require("../lib/phone");
+const { bumpCounters } = require("../lib/counters");
+const { isValidCardId, isValidHttpUrl, MAX_STORE_NAME_LEN, MAX_LINK_LEN } = require("../lib/validate");
 
 module.exports = async function handler(req, res) {
   if (req.method !== "POST") {
@@ -16,14 +22,30 @@ module.exports = async function handler(req, res) {
     const { id, storeName, reviewLink, waNumber, pin } = req.body || {};
     const cardId = (id || "").toString().trim();
 
-    if (!cardId) {
-      return res.status(400).json({ error: "ID kartu tidak valid" });
+    if (!isValidCardId(cardId)) {
+      return res.status(400).json({
+        error: "ID kartu tidak valid (3-40 karakter, hanya huruf/angka/dash/underscore)",
+      });
     }
     if (!storeName || !reviewLink || !waNumber) {
       return res.status(400).json({ error: "Semua field wajib diisi" });
     }
     if (!/^\d{4}$/.test(String(pin || ""))) {
       return res.status(400).json({ error: "PIN harus terdiri dari 4 angka" });
+    }
+
+    const trimmedName = String(storeName).trim();
+    const trimmedLink = String(reviewLink).trim();
+    if (trimmedName.length > MAX_STORE_NAME_LEN) {
+      return res.status(400).json({ error: `Nama toko maksimal ${MAX_STORE_NAME_LEN} karakter` });
+    }
+    if (trimmedLink.length > MAX_LINK_LEN || !isValidHttpUrl(trimmedLink)) {
+      return res.status(400).json({ error: "Link review tidak valid (harus URL lengkap, contoh: https://...)" });
+    }
+
+    const normalizedWa = formatPhoneToIntl(waNumber);
+    if (normalizedWa.length < 8 || normalizedWa.length > 15) {
+      return res.status(400).json({ error: "Nomor WA tidak valid" });
     }
 
     const ref = db.collection("cards").doc(cardId);
@@ -35,16 +57,14 @@ module.exports = async function handler(req, res) {
     }
     const wasReadyStock = existingData && existingData.status === "READY";
 
-    const normalizedWa = formatPhoneToIntl(waNumber);
     const pinHash = hashPin(pin, cardId);
-    const trimmedName = String(storeName).trim();
 
     await ref.set(
       {
         status: "ACTIVE",
         storeName: trimmedName,
         storeNameLower: trimmedName.toLowerCase(),
-        reviewLink: String(reviewLink).trim(),
+        reviewLink: trimmedLink,
         waNumber: normalizedWa,
         pinHash,
         totalScans: existingData ? Number(existingData.totalScans || 0) : 0,
@@ -62,7 +82,7 @@ module.exports = async function handler(req, res) {
     return res.status(200).json({
       success: true,
       storeName: trimmedName,
-      reviewLink: String(reviewLink).trim(),
+      reviewLink: trimmedLink,
       waNumber: normalizedWa,
     });
   } catch (err) {

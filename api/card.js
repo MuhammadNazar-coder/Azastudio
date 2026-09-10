@@ -10,9 +10,9 @@
 // Kalau kartu belum ada, exists:false — frontend akan menampilkan form
 // aktivasi. Endpoint ini juga dibatasi per-IP supaya scan/enumerasi massal
 // ID kartu tetap kena rate limit walau ID yang dicoba selalu berbeda.
-const { db } = require("./_firebaseAdmin");
-const { checkRateLimit } = require("./_rateLimit");
-const { getClientIp } = require("./_requestIp");
+const { db } = require("../lib/firebaseAdmin");
+const { checkRateLimit } = require("../lib/rateLimit");
+const { getClientIp } = require("../lib/requestIp");
 
 const MAX_ATTEMPTS = 60;
 const WINDOW_MS = 10 * 60 * 1000; // 10 menit

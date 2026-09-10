@@ -12,7 +12,7 @@
 // SETUP: tambahkan Environment Variable CRON_SECRET di Vercel (string
 // acak minimal 16 karakter). Vercel otomatis mengirim nilai itu sebagai
 // header Authorization setiap cron ini dijalankan.
-const { db } = require("./_firebaseAdmin");
+const { db } = require("../lib/firebaseAdmin");
 
 const RETENTION_DAYS = 180;
 const BATCH_SIZE = 400; // di bawah batas 500 write/batch Firestore

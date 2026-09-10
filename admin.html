@@ -468,6 +468,21 @@
 <script>
   const $ = (id) => document.getElementById(id);
 
+  // Wajib dipakai untuk SEMUA teks yang berasal dari data kartu (id,
+  // storeName, reviewLink, dll) sebelum dimasukkan ke innerHTML. Field-field
+  // itu diisi lewat form aktivasi publik (tidak perlu login), jadi bisa saja
+  // berisi karakter HTML/script kalau ada yang iseng — escape supaya
+  // browser selalu menampilkannya sebagai teks biasa, bukan dieksekusi.
+  function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    }[c]));
+  }
+
   async function callApi(path, options) {
     const res = await fetch(path, options);
     const data = await res.json().catch(() => ({}));
@@ -499,7 +514,7 @@
   function showToast(message, type = "info") {
     const el = document.createElement("div");
     el.className = `toast ${type === "error" ? "toast-error" : ""}`;
-    el.innerHTML = `<span>${message}</span>`;
+    el.innerHTML = `<span>${escapeHtml(message)}</span>`;
     $("toast-stack").appendChild(el);
     setTimeout(() => el.remove(), 3500);
   }
@@ -579,6 +594,21 @@
       showLogin();
     }
   }
+
+  // Auto-refresh dasbor saat tab ini kembali terlihat (misal Anda pindah ke
+  // tab/app lain buat scan atau aktivasi kartu, lalu balik lagi ke sini) —
+  // supaya tidak perlu tekan refresh manual tiap kali ada perubahan dari
+  // luar. Dibatasi maksimal 1x tiap 5 detik supaya tidak boros kalau
+  // gonta-ganti tab dengan cepat.
+  let lastAutoRefresh = 0;
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    if ($("view-app").classList.contains("hidden")) return; // belum login
+    const now = Date.now();
+    if (now - lastAutoRefresh < 5000) return;
+    lastAutoRefresh = now;
+    loadDashboard();
+  });
 
   async function loadDashboard() {
     const { data } = await callApi("/api/admin?action=stats");
@@ -712,28 +742,40 @@
       const statusBadge = it.status === "ACTIVE"
         ? `<span class="badge badge-active">Aktif</span>`
         : `<span class="badge badge-ready">Stok Siap</span>`;
-      const targetUrl = `${window.location.origin}/?id=${it.id}`;
-      const reviewLinkCell = it.reviewLink
-        ? `<a href="${it.reviewLink}" target="_blank" rel="noopener" class="btn-link" style="font-size:12.5px;">Buka Link ↗</a>`
-        : `<span style="color: rgba(19,35,32,0.3);">-</span>`;
+      const safeId = escapeHtml(it.id);
+      const targetUrl = `${window.location.origin}/?id=${encodeURIComponent(it.id)}`;
+      const safeTargetUrl = escapeHtml(targetUrl);
+      // reviewLink harus URL http(s) yang valid sebelum dipakai sebagai href
+      // — mencegah skema berbahaya seperti javascript: dipakai buat XSS.
+      let reviewLinkCell = `<span style="color: rgba(19,35,32,0.3);">-</span>`;
+      if (it.reviewLink) {
+        let isHttpUrl = false;
+        try {
+          const u = new URL(it.reviewLink);
+          isHttpUrl = u.protocol === "http:" || u.protocol === "https:";
+        } catch {}
+        reviewLinkCell = isHttpUrl
+          ? `<a href="${escapeHtml(it.reviewLink)}" target="_blank" rel="noopener" class="btn-link" style="font-size:12.5px;">Buka Link ↗</a>`
+          : `<span style="color: rgba(19,35,32,0.3);" title="Link tidak valid">-</span>`;
+      }
       const lastScanned = it.lastScanned
         ? new Date(it.lastScanned).toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" })
         : "-";
       return `
         <tr>
-          <td class="cell-id">${it.id}</td>
+          <td class="cell-id">${safeId}</td>
           <td>${statusBadge}</td>
-          <td>${it.storeName || "-"}</td>
+          <td>${escapeHtml(it.storeName) || "-"}</td>
           <td>${reviewLinkCell}</td>
           <td>
-            <span class="scan-count">${it.totalScans}</span>
-            <div class="scan-date">${lastScanned}</div>
+            <span class="scan-count">${Number(it.totalScans) || 0}</span>
+            <div class="scan-date">${escapeHtml(lastScanned)}</div>
           </td>
-          <td class="cell-url"><code>${targetUrl}</code></td>
+          <td class="cell-url"><code>${safeTargetUrl}</code></td>
           <td>
             <div class="row-actions">
-              <button data-id="${it.id}" data-url="${targetUrl}" class="btn-link btn-print-qr">Cetak QR</button>
-              <button data-id="${it.id}" class="btn-link btn-link-warn btn-delete">Hapus</button>
+              <button data-id="${safeId}" data-url="${safeTargetUrl}" class="btn-link btn-print-qr">Cetak QR</button>
+              <button data-id="${safeId}" class="btn-link btn-link-warn btn-delete">Hapus</button>
             </div>
           </td>
         </tr>`;

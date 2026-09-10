@@ -3,9 +3,9 @@
 // Hanya mengembalikan { valid: true/false } — PIN asli / hash-nya
 // tidak pernah dikirim balik ke browser. Percobaan dibatasi per kartu
 // supaya PIN 4-angka (10.000 kombinasi) tidak bisa ditebak dengan mudah.
-const { db } = require("./_firebaseAdmin");
-const { hashPin } = require("./_hash");
-const { checkRateLimit, resetRateLimit } = require("./_rateLimit");
+const { db } = require("../lib/firebaseAdmin");
+const { hashPin } = require("../lib/hash");
+const { checkRateLimit, resetRateLimit } = require("../lib/rateLimit");
 
 const MAX_ATTEMPTS = 8;
 const WINDOW_MS = 10 * 60 * 1000; // 10 menit

@@ -10,28 +10,42 @@ pemantauan stok.
 ```
 index.html          -> halaman kartu yang dilihat pelanggan (?id=KODE)
 admin.html          -> dasbor admin (generate stok, QR studio, daftar kartu)
-api/                -> serverless functions (Vercel)
-  _firebaseAdmin.js   koneksi Firestore (Admin SDK, server-only)
-  _hash.js            hash PIN (SHA-256 + salt + pepper)
-  _phone.js           normalisasi nomor WA ke format internasional
-  _adminAuth.js       sesi login admin (cookie ter-signature)
-  _rateLimit.js       rate limit berbasis Firestore
-  _requestIp.js       ambil IP klien untuk rate limit
-  _counters.js        counter agregat (statistik O(1), tanpa full scan)
+
+api/                -> HANYA endpoint asli (tiap file = 1 Vercel Function,
+                        dibatasi 12 function di paket Hobby/gratis)
   card.js             GET data publik kartu (tanpa PIN, tanpa nomor WA)
   card-contact.js     POST ambil nomor WA (khusus alur komplain)
   activate.js         aktivasi kartu baru / isi stok READY
   verify-pin.js       verifikasi PIN pemilik toko
   update-card.js      edit data kartu (perlu PIN)
   track-scan.js       catat 1 scan (dipanggil otomatis dari index.html)
-  admin-login.js / admin-logout.js
-  admin-stats.js      statistik dasbor
-  admin-list.js       daftar kartu (cursor pagination + search)
-  admin-generate.js   generate stok QR baru
-  admin-delete.js     hapus kartu
-  admin-export.js     export CSV
+  admin.js            SEMUA endpoint dasbor admin jadi satu function,
+                       dipilih lewat ?action=login|logout|stats|list|
+                       generate|delete|export (lihat komentar di file ini)
   cron-cleanup-logs.js  cron harian: buang log scan > 180 hari
+
+lib/                -> kode bersama (BUKAN endpoint, tidak dihitung ke
+                        batas 12 function karena di luar folder api/)
+  firebaseAdmin.js    koneksi Firestore (Admin SDK, server-only)
+  hash.js             hash PIN (SHA-256 + salt + pepper)
+  phone.js            normalisasi nomor WA ke format internasional
+  adminAuth.js        sesi login admin (cookie ter-signature)
+  rateLimit.js        rate limit berbasis Firestore (transaksi, aman dari
+                       serangan paralel)
+  requestIp.js         ambil IP klien untuk rate limit
+  counters.js         counter agregat (statistik O(1), tanpa full scan)
+  validate.js         validasi format ID kartu, nama toko, & link review
 ```
+
+> **Kenapa dipisah `api/` dan `lib/`**: Vercel menghitung SETIAP file yang
+> ada langsung di dalam folder `api/` sebagai 1 serverless function
+> tersendiri — termasuk file "helper" sekalipun namanya diawali underscore
+> (`_hash.js` dst tetap dihitung, awalan `_` cuma konvensi penamaan, bukan
+> instruksi ke Vercel). Paket Hobby (gratis) dibatasi maksimal 12 function
+> per deployment. Kalau semua helper ikut ditaruh di `api/`, jumlahnya bisa
+> lewat 12 dan **deployment langsung gagal** sebelum sempat dites. Taruh
+> semua kode yang cuma di-`require()` (bukan endpoint) di `lib/` supaya
+> tidak ikut dihitung.
 
 ## Setup
 
