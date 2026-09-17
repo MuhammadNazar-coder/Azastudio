@@ -431,9 +431,17 @@
       const { ok, data } = await callApi(`/api/card?id=${encodeURIComponent(cardId)}`);
       if (!ok) throw new Error(data?.error || "Gagal memuat data kartu");
 
-      if (!data.exists) {
+      if (data.status === "ready") {
+        // Stok sah (sudah digenerate admin), belum diaktivasi pemiliknya.
         $("activation-card-id").textContent = cardId;
         showView("activation");
+      } else if (data.status === "not_found") {
+        // ID ini tidak pernah digenerate lewat dasbor admin — jangan
+        // tampilkan form aktivasi, supaya tidak bisa dipakai untuk
+        // "membuat produk sendiri" dengan ID karangan.
+        showView("error");
+        $("view-error").querySelector("p.muted").textContent =
+          "Kartu ini tidak dikenali. Pastikan Anda memindai kode dari kartu akrilik asli.";
       } else {
         renderGate(data);
         showView("gate");
