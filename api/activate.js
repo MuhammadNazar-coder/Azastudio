@@ -1,7 +1,10 @@
 // POST /api/activate
 // body: { id, storeName, reviewLink, waNumber, pin }
-// Membuat dokumen baru di Firestore (atau mengisi stok READY yang sudah
-// digenerate lewat dasbor admin). Menolak jika ID sudah aktif.
+// Mengisi data toko ke kartu stok yang statusnya READY (sudah digenerate
+// lewat dasbor admin). TIDAK membuat dokumen baru dari ID sembarangan —
+// kalau ID belum pernah digenerate admin, ditolak 404. Ini sengaja,
+// supaya orang tidak bisa "membuat produk sendiri" cuma dengan
+// menebak/mengarang ID kartu.
 //
 // Semua input divalidasi ketat di sini (bukan cuma di browser), karena
 // endpoint ini PUBLIK (siapa saja bisa panggil tanpa login) dan hasilnya
@@ -50,12 +53,26 @@ module.exports = async function handler(req, res) {
 
     const ref = db.collection("cards").doc(cardId);
     const existing = await ref.get();
-    const existingData = existing.exists ? existing.data() : null;
-    const alreadyActive = existingData && (existingData.status === "ACTIVE" || (!existingData.status && existingData.pinHash));
+
+    // ID harus sudah digenerate lebih dulu lewat dasbor admin (status
+    // READY). Kalau dokumennya sama sekali tidak ada di Firestore, artinya
+    // ID ini cuma tebakan/karangan bebas -> tolak. Ini yang menutup celah
+    // "orang bisa bikin produk sendiri" cuma dengan menebak/mengarang ID.
+    if (!existing.exists) {
+      return res.status(404).json({
+        error: "Kartu ini belum terdaftar. Aktivasi hanya bisa lewat kartu asli dari toko.",
+      });
+    }
+
+    const existingData = existing.data();
+    const alreadyActive = existingData.status === "ACTIVE" || (!existingData.status && existingData.pinHash);
     if (alreadyActive) {
       return res.status(409).json({ error: "Kartu ini sudah aktif" });
     }
-    const wasReadyStock = existingData && existingData.status === "READY";
+    if (existingData.status && existingData.status !== "READY") {
+      // Status lain (mis. ditandai nonaktif/diblokir admin) -> tolak juga.
+      return res.status(403).json({ error: "Kartu ini tidak bisa diaktivasi." });
+    }
 
     const pinHash = hashPin(pin, cardId);
 
@@ -67,17 +84,17 @@ module.exports = async function handler(req, res) {
         reviewLink: trimmedLink,
         waNumber: normalizedWa,
         pinHash,
-        totalScans: existingData ? Number(existingData.totalScans || 0) : 0,
-        lastScanned: existingData ? existingData.lastScanned || null : null,
-        createdAt: existingData ? existingData.createdAt || new Date().toISOString() : new Date().toISOString(),
+        totalScans: Number(existingData.totalScans || 0),
+        lastScanned: existingData.lastScanned || null,
+        createdAt: existingData.createdAt || new Date().toISOString(),
         activatedAt: new Date().toISOString(),
       },
       { merge: true }
     );
 
-    // Kartu yang tadinya stok READY -> geser ke active. Kartu yang dibuat
-    // spontan (tidak lewat dasbor) -> langsung tambah active saja.
-    await bumpCounters(wasReadyStock ? { ready: -1, active: 1 } : { active: 1 });
+    // Sekarang existingData sudah pasti ada (kita tolak di atas kalau
+    // dokumennya tidak ditemukan), jadi ini selalu geser dari stok READY.
+    await bumpCounters({ ready: -1, active: 1 });
 
     return res.status(200).json({
       success: true,

@@ -7,9 +7,18 @@
 // diambil lewat /api/card-contact, hanya saat pelanggan benar-benar
 // mengirim keluhan (lihat file itu untuk rate limit-nya).
 //
-// Kalau kartu belum ada, exists:false — frontend akan menampilkan form
-// aktivasi. Endpoint ini juga dibatasi per-IP supaya scan/enumerasi massal
-// ID kartu tetap kena rate limit walau ID yang dicoba selalu berbeda.
+// Membedakan 3 kondisi lewat field `status`:
+//   "not_found" -> ID ini TIDAK PERNAH digenerate lewat dasbor admin.
+//                  Frontend menampilkan pesan "kartu tidak dikenali",
+//                  BUKAN form aktivasi — supaya orang tidak bisa
+//                  "membuat produk sendiri" cuma dengan menebak ID bebas.
+//   "ready"     -> ID ini stok sah (sudah digenerate admin) tapi belum
+//                  diaktivasi pemiliknya. Frontend menampilkan form
+//                  aktivasi seperti biasa.
+//   "active"    -> kartu sudah aktif, frontend menampilkan gate review.
+//
+// Endpoint ini juga dibatasi per-IP supaya scan/enumerasi massal ID kartu
+// tetap kena rate limit walau ID yang dicoba selalu berbeda.
 const { db } = require("../lib/firebaseAdmin");
 const { checkRateLimit } = require("../lib/rateLimit");
 const { getClientIp } = require("../lib/requestIp");
@@ -36,17 +45,21 @@ module.exports = async function handler(req, res) {
 
     const snap = await db.collection("cards").doc(id).get();
     if (!snap.exists) {
-      return res.status(200).json({ exists: false });
+      return res.status(200).json({ exists: false, status: "not_found" });
     }
     const data = snap.data();
 
     const isActive = data.status === "ACTIVE" || (!data.status && data.pinHash);
     if (!isActive) {
-      return res.status(200).json({ exists: false });
+      // Statusnya READY (atau status lain yang belum aktif) -> tetap
+      // dianggap stok sah, bukan "not_found", karena memang ada di
+      // Firestore hasil generate admin.
+      return res.status(200).json({ exists: false, status: "ready" });
     }
 
     return res.status(200).json({
       exists: true,
+      status: "active",
       storeName: data.storeName || "",
       reviewLink: data.reviewLink || "",
     });
